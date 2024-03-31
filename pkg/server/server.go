@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
@@ -18,16 +17,19 @@ import (
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/daemons/control"
+	"github.com/k3s-io/k3s/pkg/daemons/executor"
 	"github.com/k3s-io/k3s/pkg/datadir"
 	"github.com/k3s-io/k3s/pkg/deploy"
 	"github.com/k3s-io/k3s/pkg/node"
 	"github.com/k3s-io/k3s/pkg/nodepassword"
 	"github.com/k3s-io/k3s/pkg/rootlessports"
 	"github.com/k3s-io/k3s/pkg/secretsencrypt"
+	"github.com/k3s-io/k3s/pkg/server/handlers"
 	"github.com/k3s-io/k3s/pkg/static"
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/permissions"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/rancher/wrangler/pkg/apply"
 	v1 "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
 	"github.com/rancher/wrangler/pkg/leader"
@@ -35,8 +37,8 @@ import (
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 func ResolveDataDir(dataDir string) (string, error) {
@@ -44,7 +46,10 @@ func ResolveDataDir(dataDir string) (string, error) {
 	return filepath.Join(dataDir, "server"), err
 }
 
-func StartServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
+// PrepareServer prepares the server for operation. This includes setting paths
+// in ControlConfig, creating any certificates not extracted from the bootstrap
+// data, and binding request handlers.
+func PrepareServer(ctx context.Context, wg *sync.WaitGroup, config *Config, cfg *cmds.Server) error {
 	if err := setupDataDirAndChdir(&config.ControlConfig); err != nil {
 		return err
 	}
@@ -53,28 +58,34 @@ func StartServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
 		return err
 	}
 
-	if err := control.Server(ctx, &config.ControlConfig); err != nil {
-		return errors.Wrap(err, "starting kubernetes")
+	if err := control.Prepare(ctx, wg, &config.ControlConfig); err != nil {
+		return err
 	}
 
-	wg := &sync.WaitGroup{}
-	wg.Add(len(config.StartupHooks))
+	config.ControlConfig.Runtime.Handler = handlers.NewHandler(ctx, &config.ControlConfig, cfg)
 
-	config.ControlConfig.Runtime.Handler = router(ctx, config, cfg)
-	config.ControlConfig.Runtime.StartupHooksWg = wg
+	return nil
+}
+
+// StartServer starts whatever control-plane and etcd components are enabled by
+// the current server configuration, runs startup hooks, starts controllers,
+// and writes the admin kubeconfig.
+func StartServer(ctx context.Context, wg *sync.WaitGroup, config *Config, cfg *cmds.Server) error {
+	if err := control.Server(ctx, wg, &config.ControlConfig); err != nil {
+		return pkgerrors.WithMessage(err, "starting kubernetes")
+	}
 
 	shArgs := cmds.StartupHookArgs{
-		APIServerReady:       config.ControlConfig.Runtime.APIServerReady,
+		APIServerReady:       executor.APIServerReadyChan(),
 		KubeConfigSupervisor: config.ControlConfig.Runtime.KubeConfigSupervisor,
 		Skips:                config.ControlConfig.Skips,
 		Disables:             config.ControlConfig.Disables,
 	}
 	for _, hook := range config.StartupHooks {
-		if err := hook(ctx, wg, shArgs); err != nil {
-			return errors.Wrap(err, "startup hook")
+		if err := hook(ctx, config.ControlConfig.Runtime.StartupHooksWg, shArgs); err != nil {
+			return pkgerrors.WithMessage(err, "startup hook")
 		}
 	}
-
 	go startOnAPIServerReady(ctx, config)
 
 	if err := printTokens(&config.ControlConfig); err != nil {
@@ -88,7 +99,7 @@ func startOnAPIServerReady(ctx context.Context, config *Config) {
 	select {
 	case <-ctx.Done():
 		return
-	case <-config.ControlConfig.Runtime.APIServerReady:
+	case <-executor.APIServerReadyChan():
 		if err := runControllers(ctx, config); err != nil {
 			logrus.Fatalf("failed to start controllers: %v", err)
 		}
@@ -98,26 +109,32 @@ func startOnAPIServerReady(ctx context.Context, config *Config) {
 func runControllers(ctx context.Context, config *Config) error {
 	controlConfig := &config.ControlConfig
 
-	sc, err := NewContext(ctx, config, true)
+	sc, err := NewContext(ctx, config)
 	if err != nil {
-		return errors.Wrap(err, "failed to create new server context")
+		return pkgerrors.WithMessage(err, "failed to create new server context")
 	}
 
 	controlConfig.Runtime.StartupHooksWg.Wait()
 	if err := stageFiles(ctx, sc, controlConfig); err != nil {
-		return errors.Wrap(err, "failed to stage files")
+		return pkgerrors.WithMessage(err, "failed to stage files")
 	}
 
-	// run migration before we set controlConfig.Runtime.Core
-	if err := nodepassword.MigrateFile(
-		sc.Core.Core().V1().Secret(),
-		sc.Core.Core().V1().Node(),
-		controlConfig.Runtime.NodePasswdFile); err != nil {
-		logrus.Warn(errors.Wrap(err, "error migrating node-password file"))
+	// start the nodepassword controller before we set controlConfig.Runtime.Core
+	if err := nodepassword.Register(ctx, sc.K8s, sc.Core.Core().V1().Secret(), sc.Core.Core().V1().Node()); err != nil {
+		return pkgerrors.WithMessage(err, "failed to start node-password secret controller")
 	}
+
+	controlConfig.Runtime.K8s = sc.K8s
 	controlConfig.Runtime.K3s = sc.K3s
 	controlConfig.Runtime.Event = sc.Event
 	controlConfig.Runtime.Core = sc.Core
+	controlConfig.Runtime.Discovery = sc.Discovery
+
+	// Create a new context to use for wrangler controllers that is
+	// cancelled on a delay after the signal context. This allows other things
+	// (like etcd) to clean up, before wrangler's leader.RunOrDie calls
+	// exit when its context is cancelled.
+	ctx = util.DelayCancel(ctx, util.DefaultContextDelay)
 
 	for name, cb := range controlConfig.Runtime.ClusterControllerStarts {
 		go runOrDie(ctx, name, cb)
@@ -125,12 +142,12 @@ func runControllers(ctx context.Context, config *Config) error {
 
 	for _, controller := range config.Controllers {
 		if err := controller(ctx, sc); err != nil {
-			return errors.Wrapf(err, "failed to start %s controller", util.GetFunctionName(controller))
+			return pkgerrors.WithMessagef(err, "failed to start %s controller", util.GetFunctionName(controller))
 		}
 	}
 
 	if err := sc.Start(ctx); err != nil {
-		return errors.Wrap(err, "failed to start wranger controllers")
+		return pkgerrors.WithMessage(err, "failed to start wranger controllers")
 	}
 
 	if !controlConfig.DisableAPIServer {
@@ -164,14 +181,14 @@ func apiserverControllers(ctx context.Context, sc *Context, config *Config) {
 	}
 	for _, controller := range config.LeaderControllers {
 		if err := controller(ctx, sc); err != nil {
-			panic(errors.Wrapf(err, "failed to start %s leader controller", util.GetFunctionName(controller)))
+			panic(pkgerrors.WithMessagef(err, "failed to start %s leader controller", util.GetFunctionName(controller)))
 		}
 	}
 
-	// Re-run context startup after core and leader-elected controllers have started. Additional
-	// informer caches may need to start for the newly added OnChange callbacks.
+	// Re-run informer factory startup after core and leader-elected controllers have started.
+	// Additional caches may need to start for the newly added OnChange/OnRemove callbacks.
 	if err := sc.Start(ctx); err != nil {
-		panic(errors.Wrap(err, "failed to start wranger controllers"))
+		panic(pkgerrors.WithMessage(err, "failed to start wranger controllers"))
 	}
 }
 
@@ -188,7 +205,7 @@ func runOrDie(ctx context.Context, name string, cb leader.Callback) {
 }
 
 // coreControllers starts the following controllers, if they are enabled:
-// * Node controller (manages nodes passwords and coredns hosts file)
+// * Node controller (manages coredns node hosts file)
 // * Helm controller
 // * Secrets encryption
 // * Rootless ports
@@ -196,21 +213,21 @@ func runOrDie(ctx context.Context, name string, cb leader.Callback) {
 func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 	if err := node.Register(ctx,
 		!config.ControlConfig.Skips["coredns"],
-		sc.Core.Core().V1().Secret(),
-		sc.Core.Core().V1().ConfigMap(),
+		sc.K8s,
 		sc.Core.Core().V1().Node()); err != nil {
 		return err
 	}
 
-	// apply SystemDefaultRegistry setting to Helm before starting controllers
+	// Apply SystemDefaultRegistry setting to Helm before starting controllers.
+	// Internally helm-controller defaults to latest tag, but we inject a immutable version at build time.
 	if config.ControlConfig.HelmJobImage != "" {
 		helmchart.DefaultJobImage = config.ControlConfig.HelmJobImage
 	} else if config.ControlConfig.SystemDefaultRegistry != "" {
 		helmchart.DefaultJobImage = config.ControlConfig.SystemDefaultRegistry + "/" + helmchart.DefaultJobImage
 	}
 
-	if !config.ControlConfig.DisableHelmController {
-		restConfig, err := clientcmd.BuildConfigFromFlags("", config.ControlConfig.Runtime.KubeConfigSupervisor)
+	if sc.Helm != nil {
+		restConfig, err := util.GetRESTConfig(config.ControlConfig.Runtime.KubeConfigSupervisor)
 		if err != nil {
 			return err
 		}
@@ -221,7 +238,7 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 			return err
 		}
 
-		apply := apply.New(k8s, apply.NewClientFactory(restConfig)).WithDynamicLookup()
+		apply := apply.New(k8s, apply.NewClientFactory(restConfig)).WithDynamicLookup().WithSetOwnerReference(false, false)
 		helm := sc.Helm.WithAgent(restConfig.UserAgent)
 		batch := sc.Batch.WithAgent(restConfig.UserAgent)
 		auth := sc.Auth.WithAgent(restConfig.UserAgent)
@@ -230,7 +247,7 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 			metav1.NamespaceAll,
 			helmcommon.Name,
 			"cluster-admin",
-			strconv.Itoa(config.ControlConfig.APIServerPort),
+			strconv.Itoa(config.ControlConfig.HTTPSPort),
 			k8s,
 			apply,
 			util.BuildControllerEventRecorder(k8s, helmcommon.Name, metav1.NamespaceAll),
@@ -244,16 +261,6 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 			core.V1().ServiceAccount(),
 			core.V1().ConfigMap(),
 			core.V1().Secret())
-	}
-
-	if config.ControlConfig.EncryptSecrets {
-		if err := secretsencrypt.Register(ctx,
-			sc.K8s,
-			&config.ControlConfig,
-			sc.Core.Core().V1().Node(),
-			sc.Core.Core().V1().Secret()); err != nil {
-			return err
-		}
 	}
 
 	if config.ControlConfig.Rootless {
@@ -293,15 +300,11 @@ func stageFiles(ctx context.Context, sc *Context, controlConfig *config.Control)
 	}
 
 	skip := controlConfig.Skips
-	if !skip["traefik"] && isHelmChartTraefikV1(sc) {
-		logrus.Warn("Skipping Traefik v2 deployment due to existing Traefik v1 installation")
-		skip["traefik"] = true
-	}
 	if err := deploy.Stage(dataDir, templateVars, skip); err != nil {
 		return err
 	}
 
-	restConfig, err := clientcmd.BuildConfigFromFlags("", controlConfig.Runtime.KubeConfigSupervisor)
+	restConfig, err := util.GetRESTConfig(controlConfig.Runtime.KubeConfigSupervisor)
 	if err != nil {
 		return err
 	}
@@ -343,26 +346,9 @@ func addrTypesPrioTemplate(flannelExternal bool) string {
 	return "InternalIP,ExternalIP,Hostname"
 }
 
-// isHelmChartTraefikV1 checks for an existing HelmChart resource with spec.chart containing traefik-1,
-// as deployed by the legacy chart (https://%{KUBERNETES_API}%/static/charts/traefik-1.81.0.tgz)
-func isHelmChartTraefikV1(sc *Context) bool {
-	prefix := "traefik-1."
-	helmChart, err := sc.Helm.Helm().V1().HelmChart().Get(metav1.NamespaceSystem, "traefik", metav1.GetOptions{})
-	if err != nil {
-		logrus.WithError(err).Info("Failed to get existing traefik HelmChart")
-		return false
-	}
-	chart := path.Base(helmChart.Spec.Chart)
-	if strings.HasPrefix(chart, prefix) {
-		logrus.WithField("chart", chart).Info("Found existing traefik v1 HelmChart")
-		return true
-	}
-	return false
-}
-
 func HomeKubeConfig(write, rootless bool) (string, error) {
 	if write {
-		if os.Getuid() == 0 && !rootless {
+		if permissions.IsPrivileged() == nil && !rootless {
 			return datadir.GlobalConfig, nil
 		}
 		return resolvehome.Resolve(datadir.HomeConfig)
@@ -379,7 +365,7 @@ func printTokens(config *config.Control) error {
 	var serverTokenFile string
 	if config.Runtime.ServerToken != "" {
 		serverTokenFile = filepath.Join(config.DataDir, "token")
-		if err := writeToken(config.Runtime.ServerToken, serverTokenFile, config.Runtime.ServerCA); err != nil {
+		if err := handlers.WriteToken(config.Runtime.ServerToken, serverTokenFile, config.Runtime.ServerCA); err != nil {
 			return err
 		}
 
@@ -407,7 +393,7 @@ func printTokens(config *config.Control) error {
 					return err
 				}
 			}
-			if err := writeToken(config.Runtime.AgentToken, agentTokenFile, config.Runtime.ServerCA); err != nil {
+			if err := handlers.WriteToken(config.Runtime.AgentToken, agentTokenFile, config.Runtime.ServerCA); err != nil {
 				return err
 			}
 		} else if serverTokenFile != "" {
@@ -476,6 +462,13 @@ func writeKubeConfig(certs string, config *Config) error {
 		util.SetFileModeForPath(kubeConfig, os.FileMode(0600))
 	}
 
+	if config.ControlConfig.KubeConfigGroup != "" {
+		err := util.SetFileGroupForPath(kubeConfig, config.ControlConfig.KubeConfigGroup)
+		if err != nil {
+			logrus.Errorf("Failed to set %s to group %s: %v", kubeConfig, config.ControlConfig.KubeConfigGroup, err)
+		}
+	}
+
 	if kubeConfigSymlink != kubeConfig {
 		if err := writeConfigSymlink(kubeConfig, kubeConfigSymlink); err != nil {
 			logrus.Errorf("Failed to write kubeconfig symlink: %v", err)
@@ -502,11 +495,11 @@ func setupDataDirAndChdir(config *config.Control) error {
 	dataDir := config.DataDir
 
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
-		return errors.Wrapf(err, "can not mkdir %s", dataDir)
+		return pkgerrors.WithMessagef(err, "can not mkdir %s", dataDir)
 	}
 
 	if err := os.Chdir(dataDir); err != nil {
-		return errors.Wrapf(err, "can not chdir %s", dataDir)
+		return pkgerrors.WithMessagef(err, "can not chdir %s", dataDir)
 	}
 
 	return nil
@@ -514,18 +507,6 @@ func setupDataDirAndChdir(config *config.Control) error {
 
 func printToken(httpsPort int, advertiseIP, prefix, cmd, varName string) {
 	logrus.Infof("%s %s %s -s https://%s:%d -t ${%s}", prefix, version.Program, cmd, advertiseIP, httpsPort, varName)
-}
-
-func writeToken(token, file, certs string) error {
-	if len(token) == 0 {
-		return nil
-	}
-
-	token, err := clientaccess.FormatToken(token, certs)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(file, []byte(token+"\n"), 0600)
 }
 
 func setNoProxyEnv(config *config.Control) error {
@@ -569,47 +550,30 @@ func setNodeLabelsAndAnnotations(ctx context.Context, nodes v1.NodeClient, confi
 	if config.DisableAgent || config.ControlConfig.DisableAPIServer {
 		return nil
 	}
-	for {
+
+	patcher := util.NewPatcher[*corev1.Node](nodes)
+	return wait.PollImmediateUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
 		nodeName := os.Getenv("NODE_NAME")
 		if nodeName == "" {
 			logrus.Info("Waiting for control-plane node agent startup")
-			time.Sleep(1 * time.Second)
-			continue
+			return false, nil
 		}
-		node, err := nodes.Get(nodeName, metav1.GetOptions{})
-		if err != nil {
-			logrus.Infof("Waiting for control-plane node %s startup: %v", nodeName, err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-		if node.Labels == nil {
-			node.Labels = make(map[string]string)
-		}
-		v, ok := node.Labels[util.ControlPlaneRoleLabelKey]
-		if !ok || v != "true" {
-			node.Labels[util.ControlPlaneRoleLabelKey] = "true"
-			node.Labels[util.MasterRoleLabelKey] = "true"
+
+		patch := util.NewPatchList().Add("true", "metadata", "labels", util.ControlPlaneRoleLabelKey)
+		if _, err := patcher.Patch(ctx, patch, nodeName); err != nil {
+			logrus.Infof("Unable to set control-plane role label: %v", err)
+			return false, nil
 		}
 
 		if config.ControlConfig.EncryptSecrets {
-			if err = secretsencrypt.BootstrapEncryptionHashAnnotation(node, config.ControlConfig.Runtime); err != nil {
-				logrus.Infof("Unable to set encryption hash annotation %s", err.Error())
-				break
+			if err := secretsencrypt.BootstrapEncryptionHashAnnotation(ctx, config.ControlConfig.Runtime, nodeName); err != nil {
+				logrus.Infof("Unable to set encryption hash annotation %v", err)
+				return false, nil
 			}
 		}
-
-		_, err = nodes.Update(node)
-		if err == nil {
-			logrus.Infof("Labels and annotations have been set successfully on node: %s", nodeName)
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
-	}
-	return nil
+		logrus.Infof("Labels and annotations have been set successfully on node: %s", nodeName)
+		return true, nil
+	})
 }
 
 func setClusterDNSConfig(ctx context.Context, config *Config, configMap v1.ConfigMapClient) error {

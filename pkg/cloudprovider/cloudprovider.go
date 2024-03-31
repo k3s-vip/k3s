@@ -2,7 +2,7 @@ package cloudprovider
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 
 	"github.com/k3s-io/k3s/pkg/util"
@@ -28,11 +28,12 @@ import (
 // Config describes externally-configurable cloud provider configuration.
 // This is normally unmarshalled from a JSON config file.
 type Config struct {
-	LBEnabled   bool   `json:"lbEnabled"`
-	LBImage     string `json:"lbImage"`
-	LBNamespace string `json:"lbNamespace"`
-	NodeEnabled bool   `json:"nodeEnabled"`
-	Rootless    bool   `json:"rootless"`
+	LBDefaultPriorityClassName string `json:"lbDefaultPriorityClassName"`
+	LBEnabled                  bool   `json:"lbEnabled"`
+	LBImage                    string `json:"lbImage"`
+	LBNamespace                string `json:"lbNamespace"`
+	NodeEnabled                bool   `json:"nodeEnabled"`
+	Rootless                   bool   `json:"rootless"`
 }
 
 type k3s struct {
@@ -56,10 +57,11 @@ func init() {
 		var err error
 		k := k3s{
 			Config: Config{
-				LBEnabled:   true,
-				LBImage:     DefaultLBImage,
-				LBNamespace: DefaultLBNS,
-				NodeEnabled: true,
+				LBDefaultPriorityClassName: DefaultLBPriorityClassName,
+				LBEnabled:                  true,
+				LBImage:                    DefaultLBImage,
+				LBNamespace:                DefaultLBNS,
+				NodeEnabled:                true,
 			},
 		}
 
@@ -72,7 +74,7 @@ func init() {
 		}
 
 		if !k.LBEnabled && !k.NodeEnabled {
-			return nil, fmt.Errorf("all cloud-provider functionality disabled by config")
+			return nil, errors.New("all cloud-provider functionality disabled by config")
 		}
 
 		return &k, err
