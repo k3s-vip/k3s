@@ -9,7 +9,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/rancher/wrangler/pkg/crd"
 	"github.com/rancher/wrangler/pkg/generated/controllers/apps"
 	"github.com/rancher/wrangler/pkg/generated/controllers/batch"
@@ -19,7 +19,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 )
 
@@ -43,7 +42,7 @@ func NewContext(ctx context.Context, config *Config, forServer bool) (*Context, 
 	if forServer {
 		cfg = config.ControlConfig.Runtime.KubeConfigSupervisor
 	}
-	restConfig, err := clientcmd.BuildConfigFromFlags("", cfg)
+	restConfig, err := util.GetRESTConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +57,7 @@ func NewContext(ctx context.Context, config *Config, forServer bool) (*Context, 
 	if forServer {
 		recorder = util.BuildControllerEventRecorder(k8s, version.Program+"-supervisor", metav1.NamespaceAll)
 		if err := registerCrds(ctx, config, restConfig); err != nil {
-			return nil, errors.Wrap(err, "failed to register CRDs")
+			return nil, pkgerrors.WithMessage(err, "failed to register CRDs")
 		}
 	}
 
