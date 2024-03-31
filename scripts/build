@@ -16,8 +16,9 @@ PKG_CNI_PLUGINS="github.com/containernetworking/plugins"
 PKG_KUBE_ROUTER="github.com/cloudnativelabs/kube-router/v2"
 PKG_CRI_DOCKERD="github.com/Mirantis/cri-dockerd"
 PKG_ETCD="go.etcd.io/etcd"
+PKG_HELM_CONTROLLER="github.com/k3s-io/helm-controller"
 
-buildDate=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+buildDate=2024-03-14T00:54:25Z
 
 VERSIONFLAGS="
     -X ${PKG}/pkg/version.Version=${VERSION}
@@ -34,56 +35,70 @@ VERSIONFLAGS="
     -X ${PKG_K8S_BASE}/version.gitTreeState=${TREE_STATE}
     -X ${PKG_K8S_BASE}/version.buildDate=${buildDate}
 
-    -X ${PKG_CRICTL}/version.Version=${VERSION_CRICTL}
+    -X ${PKG_CRICTL}/version.Version=${VERSION_CRICTL%%-*}
 
-    -X ${PKG_CONTAINERD}/version.Version=${VERSION_CONTAINERD}
+    -X ${PKG_CONTAINERD}/version.Version=${VERSION_CONTAINERD%%-*}
     -X ${PKG_CONTAINERD}/version.Package=${PKG_CONTAINERD_K3S}
 
-    -X ${PKG_CNI_PLUGINS}/pkg/utils/buildversion.BuildVersion=${VERSION_CNIPLUGINS}
+    -X ${PKG_CNI_PLUGINS}/pkg/utils/buildversion.BuildVersion=${VERSION_CNIPLUGINS%%-*}
     -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Program=flannel
-    -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Version=${VERSION_FLANNEL_PLUGIN}+${VERSION_FLANNEL}
+    -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Version=${VERSION_FLANNEL_PLUGIN%%-*}+${VERSION_FLANNEL%%-*}
     -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Commit=HEAD
     -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.buildDate=${buildDate}
 
-    -X ${PKG_KUBE_ROUTER}/pkg/version.Version=${VERSION_KUBE_ROUTER}
+    -X ${PKG_KUBE_ROUTER}/pkg/version.Version=${VERSION_KUBE_ROUTER%%-*}
     -X ${PKG_KUBE_ROUTER}/pkg/version.BuildDate=${buildDate}
 
-    -X ${PKG_CRI_DOCKERD}/cmd/version.Version=${VERSION_CRI_DOCKERD}
+    -X ${PKG_CRI_DOCKERD}/cmd/version.Version=${VERSION_CRI_DOCKERD%%-*}
     -X ${PKG_CRI_DOCKERD}/cmd/version.GitCommit=HEAD
     -X ${PKG_CRI_DOCKERD}/cmd/version.BuildTime=${buildDate}
 
-    -X ${PKG_ETCD}/api/version.GitSHA=HEAD
+    -X ${PKG_ETCD}/api/v3/version.GitSHA=HEAD
+    -X google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=ignore
+    -X ${PKG_HELM_CONTROLLER}/pkg/controllers/chart.DefaultJobImage=rancher/klipper-helm:${VERSION_HELM_JOB}
 "
-
 if [ -n "${DEBUG}" ]; then
   GCFLAGS="-N -l"
 else
   LDFLAGS="-w -s"
 fi
 
-STATIC="
-    -extldflags '-static -lm -ldl -lz -lpthread'
-"
-TAGS="ctrd apparmor seccomp netcgo osusergo providerless urfave_cli_no_docs"
-RUNC_TAGS="apparmor seccomp"
-RUNC_STATIC="static"
+STATIC=""
+TAGS="ctrd netcgo osusergo providerless urfave_cli_no_docs sqlite_omit_load_extension"
+RUNC_STATIC=""
+RUNC_TAGS=""
 
-if [ ${OS} = windows ]; then
-    TAGS="ctrd netcgo osusergo providerless"
-fi
+case ${OS} in
+  linux)
+    TAGS="$TAGS apparmor seccomp"
+    RUNC_TAGS="$RUNC_TAGS apparmor seccomp"
 
-if [ "$SELINUX" = "true" ]; then
-    TAGS="$TAGS selinux"
-    RUNC_TAGS="$RUNC_TAGS selinux"
-fi
+    if [ "$STATIC_BUILD" == "true" ]; then
+      STATIC=$'\n-extldflags \'-static -lm -ldl -lz -lpthread\'\n'
+      TAGS="static_build libsqlite3 $TAGS"
+      RUNC_STATIC="static"
+    fi
+    if [ "$SELINUX" = "true" ]; then
+      TAGS="$TAGS selinux"
+      RUNC_TAGS="$RUNC_TAGS selinux"
+    fi
+    ;;
+  windows)
+    TAGS="$TAGS no_cri_dockerd"
 
-if [ "$STATIC_BUILD" != "true" ]; then
-    STATIC="
-"
-    RUNC_STATIC=""
-else
-    TAGS="static_build libsqlite3 $TAGS"
-fi
+    if [ "$STATIC_BUILD" == "true" ]; then
+      STATIC=$'\n-extldflags \'-static -lpthread\'\n'
+      TAGS="static_build $TAGS"
+    fi
+
+    export CXX="x86_64-w64-mingw32-g++"
+    export CC="x86_64-w64-mingw32-gcc"
+    ;;
+  *)
+    echo "[ERROR] unrecognized opertaing system: ${OS}"
+    exit 1
+    ;;
+esac
 
 mkdir -p bin
 
@@ -142,10 +157,10 @@ INSTALLBIN=$(pwd)/bin
 if [ ! -x ${INSTALLBIN}/cni${BINARY_POSTFIX} ]; then
 (
     echo Building cni
-    TMPDIR=$(mktemp -d)
+    TMPDIR=/buildroot
     trap cleanup EXIT
     WORKDIR=$TMPDIR/src/github.com/containernetworking/plugins
-    git clone --single-branch --depth=1 --branch=$VERSION_CNIPLUGINS https://github.com/rancher/plugins.git $WORKDIR
+    git clone --single-branch --depth=1 --branch=$VERSION_CNIPLUGINS https://github.com/k3s-vip/plugins.git $WORKDIR
     cd $WORKDIR
     rm -rf plugins/meta/flannel
     git clone --single-branch --depth=1 --branch=$VERSION_FLANNEL_PLUGIN https://github.com/flannel-io/cni-plugin.git plugins/meta/flannel
@@ -155,6 +170,11 @@ if [ ! -x ${INSTALLBIN}/cni${BINARY_POSTFIX} ]; then
 fi
 
 echo Building k3s
+embedFS=pkg/deploy/embed
+rm -rf $embedFS;cp -av manifests $embedFS
+embedFS=pkg/static/embed
+rm -rf $embedFS;cp -av build/static $embedFS
+CGO_CFLAGS="-DSQLITE_ENABLE_DBSTAT_VTAB=1 -DSQLITE_USE_ALLOCA=1" \
 CGO_ENABLED=1 "${GO}" build $BLDFLAGS -tags "$TAGS" -buildvcs=false -gcflags="all=${GCFLAGS}" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC" -o bin/k3s${BINARY_POSTFIX} ./cmd/server
 
 for i in "${k3s_binaries[@]}"; do

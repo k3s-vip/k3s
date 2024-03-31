@@ -3,7 +3,7 @@ package control
 import (
 	"bufio"
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -13,19 +13,14 @@ import (
 
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/daemons/control/proxy"
-	"github.com/k3s-io/k3s/pkg/generated/clientset/versioned/scheme"
 	"github.com/k3s-io/k3s/pkg/nodeconfig"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/pkg/errors"
 	"github.com/rancher/remotedialer"
 	"github.com/sirupsen/logrus"
 	"github.com/yl2chen/cidranger"
 	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/client-go/kubernetes"
 )
@@ -34,8 +29,7 @@ var defaultDialer = net.Dialer{}
 
 func loggingErrorWriter(rw http.ResponseWriter, req *http.Request, code int, err error) {
 	logrus.Debugf("Tunnel server error: %d %v", code, err)
-	rw.WriteHeader(code)
-	rw.Write([]byte(err.Error()))
+	util.SendError(err, rw, req, code)
 }
 
 func setupTunnel(ctx context.Context, cfg *config.Control) (http.Handler, error) {
@@ -80,6 +74,7 @@ var _ cidranger.RangerEntry = &tunnelEntry{}
 type tunnelEntry struct {
 	kubeletPort string
 	nodeName    string
+	podID       types.UID
 	cidr        net.IPNet
 }
 
@@ -155,11 +150,21 @@ func (t *TunnelServer) onChangePod(podName string, pod *v1.Pod) (*v1.Pod, error)
 			for _, ip := range pod.Status.PodIPs {
 				if cidr, err := util.IPStringToIPNet(ip.IP); err == nil {
 					if pod.DeletionTimestamp != nil {
-						logrus.Debugf("Tunnel server egress proxy removing Node %s Pod IP %v", nodeName, cidr)
-						t.cidrs.Remove(*cidr)
+						if nets, err := t.cidrs.ContainingNetworks(cidr.IP); err != nil && len(nets) > 0 {
+							if n, ok := nets[0].(*tunnelEntry); ok && n.podID == pod.UID {
+								// only remove entry when the matching pod is deleted; some CNIs allow
+								// IP reuse and the entry may have been replaced by a newer pod.
+								logrus.Debugf("Tunnel server egress proxy removing Node %s Pod IP %v", nodeName, cidr)
+								t.cidrs.Remove(*cidr)
+							}
+						}
 					} else {
 						logrus.Debugf("Tunnel server egress proxy updating Node %s Pod IP %s", nodeName, cidr)
-						t.cidrs.Insert(&tunnelEntry{cidr: *cidr, nodeName: nodeName})
+						t.cidrs.Insert(&tunnelEntry{
+							cidr:     *cidr,
+							nodeName: nodeName,
+							podID:    pod.UID,
+						})
 					}
 				}
 			}
@@ -173,29 +178,20 @@ func (t *TunnelServer) onChangePod(podName string, pod *v1.Pod) (*v1.Pod, error)
 func (t *TunnelServer) serveConnect(resp http.ResponseWriter, req *http.Request) {
 	bconn, err := t.dialBackend(req.Context(), req.Host)
 	if err != nil {
-		responsewriters.ErrorNegotiated(
-			newBadGateway(err.Error()),
-			scheme.Codecs.WithoutConversion(), schema.GroupVersion{}, resp, req,
-		)
+		util.SendError(err, resp, req, http.StatusBadGateway)
 		return
 	}
 
 	hijacker, ok := resp.(http.Hijacker)
 	if !ok {
-		responsewriters.ErrorNegotiated(
-			apierrors.NewInternalError(errors.New("hijacking not supported")),
-			scheme.Codecs.WithoutConversion(), schema.GroupVersion{}, resp, req,
-		)
+		util.SendError(errors.New("hijacking not supported"), resp, req, http.StatusInternalServerError)
 		return
 	}
 	resp.WriteHeader(http.StatusOK)
 
 	rconn, bufrw, err := hijacker.Hijack()
 	if err != nil {
-		responsewriters.ErrorNegotiated(
-			apierrors.NewInternalError(err),
-			scheme.Codecs.WithoutConversion(), schema.GroupVersion{}, resp, req,
-		)
+		util.SendError(err, resp, req, http.StatusInternalServerError)
 		return
 	}
 
@@ -212,7 +208,6 @@ func (t *TunnelServer) dialBackend(ctx context.Context, addr string) (net.Conn, 
 	if err != nil {
 		return nil, err
 	}
-	loopback := t.config.Loopback(true)
 
 	var nodeName string
 	var toKubelet, useTunnel bool
@@ -239,14 +234,17 @@ func (t *TunnelServer) dialBackend(ctx context.Context, addr string) (net.Conn, 
 		useTunnel = true
 	}
 
-	// Always dial kubelet via the loopback address.
-	if toKubelet {
-		addr = fmt.Sprintf("%s:%s", loopback, port)
-	}
-
 	// If connecting to something hosted by the local node, don't tunnel
 	if nodeName == t.config.ServerNodeName {
 		useTunnel = false
+		if toKubelet {
+			// Dial local kubelet at the configured bind address
+			addr = net.JoinHostPort(t.config.BindAddress, port)
+		}
+	} else if toKubelet {
+		// Dial remote kubelet via the loopback address, the remotedialer client
+		// will ensure that it hits the right local address.
+		addr = net.JoinHostPort(t.config.Loopback(false), port)
 	}
 
 	if useTunnel {
@@ -299,16 +297,5 @@ func (crw *connReadWriteCloser) Write(b []byte) (n int, err error) {
 
 func (crw *connReadWriteCloser) Close() (err error) {
 	crw.once.Do(func() { err = crw.conn.Close() })
-	return
-}
-
-func newBadGateway(message string) *apierrors.StatusError {
-	return &apierrors.StatusError{
-		ErrStatus: metav1.Status{
-			Status:  metav1.StatusFailure,
-			Code:    http.StatusBadGateway,
-			Reason:  metav1.StatusReasonInternalError,
-			Message: message,
-		},
-	}
+	return err
 }
