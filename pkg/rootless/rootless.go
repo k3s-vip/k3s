@@ -1,9 +1,9 @@
 //go:build !windows
-// +build !windows
 
 package rootless
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -11,27 +11,31 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"github.com/pkg/errors"
-	"github.com/rootless-containers/rootlesskit/pkg/child"
-	"github.com/rootless-containers/rootlesskit/pkg/copyup/tmpfssymlink"
-	"github.com/rootless-containers/rootlesskit/pkg/network/slirp4netns"
-	"github.com/rootless-containers/rootlesskit/pkg/parent"
+	"github.com/rootless-containers/rootlesskit/v3/pkg/child"
+	"github.com/rootless-containers/rootlesskit/v3/pkg/copyup/tmpfssymlink"
+	"github.com/rootless-containers/rootlesskit/v3/pkg/network/slirp4netns"
+	"github.com/rootless-containers/rootlesskit/v3/pkg/parent"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
 
 var (
-	pipeFD             = "_K3S_ROOTLESS_FD"
-	childEnv           = "_K3S_ROOTLESS_SOCK"
-	evacuateCgroup2Env = "_K3S_ROOTLESS_EVACUATE_CGROUP2" // boolean
-	Sock               = ""
+	pipeFD                 = "_K3S_ROOTLESS_FD"
+	childEnv               = "_K3S_ROOTLESS_SOCK"
+	evacuateCgroup2Env     = "_K3S_ROOTLESS_EVACUATE_CGROUP2" // boolean
+	childUseActivationEnv  = "_K3S_ROOTLESS_CHILD_USE_ACTIVATION"
+	runActivationHelperEnv = "_K3S_ROOTLESS_RUN_ACTIVATION_HELPER"
+	Sock                   = ""
 
 	mtuEnv             = "K3S_ROOTLESS_MTU"
 	cidrEnv            = "K3S_ROOTLESS_CIDR"
 	enableIPv6Env      = "K3S_ROOTLESS_ENABLE_IPV6"
 	portDriverEnv      = "K3S_ROOTLESS_PORT_DRIVER"
 	disableLoopbackEnv = "K3S_ROOTLESS_DISABLE_HOST_LOOPBACK"
+	copyUpDirsEnv      = "K3S_ROOTLESS_COPYUPDIRS"
+	stateDirEnv        = "K3S_ROOTLESS_STATE_DIR"
 )
 
 func Rootless(stateDir string, enableIPv6 bool) error {
@@ -78,6 +82,8 @@ func Rootless(stateDir string, enableIPv6 bool) error {
 	if err := parent.Parent(*parentOpt); err != nil {
 		logrus.Fatal(err)
 	}
+
+	//revive:disable-next-line:deep-exit
 	os.Exit(0)
 
 	return nil
@@ -96,7 +102,7 @@ func validateSysctl() error {
 	for key, expectedValue := range expected {
 		if actualValue, err := readSysctl(key); err == nil {
 			if expectedValue != actualValue {
-				return errors.Errorf("expected sysctl value %q to be %q, got %q; try adding \"%s=%s\" to /etc/sysctl.conf and running `sudo sysctl --system`",
+				return fmt.Errorf("expected sysctl value %q to be %q, got %q; try adding \"%s=%s\" to /etc/sysctl.conf and running `sudo sysctl --system`",
 					key, expectedValue, actualValue, key, expectedValue)
 			}
 		}
@@ -122,24 +128,26 @@ func parseCIDR(s string) (*net.IPNet, error) {
 		return nil, err
 	}
 	if !ip.Equal(ipnet.IP) {
-		return nil, errors.Errorf("cidr must be like 10.0.2.0/24, not like 10.0.2.100/24")
+		return nil, errors.New("host identifier bits must not be set in CIDR prefix")
 	}
 	return ipnet, nil
 }
 
 func createParentOpt(driver portDriver, stateDir string, enableIPv6 bool) (*parent.Opt, error) {
 	if err := os.MkdirAll(stateDir, 0755); err != nil {
-		return nil, errors.Wrapf(err, "failed to mkdir %s", stateDir)
+		return nil, errors.WithMessagef(err, "failed to mkdir %s", stateDir)
 	}
 
 	driver.SetStateDir(stateDir)
 
 	opt := &parent.Opt{
-		StateDir:       stateDir,
-		CreatePIDNS:    true,
-		CreateCgroupNS: true,
-		CreateUTSNS:    true,
-		CreateIPCNS:    true,
+		StateDir:                 stateDir,
+		StateDirEnvKey:           stateDirEnv,
+		ChildUseActivationEnvKey: childUseActivationEnv,
+		CreatePIDNS:              true,
+		CreateCgroupNS:           true,
+		CreateUTSNS:              true,
+		CreateIPCNS:              true,
 	}
 
 	selfCgroupMap, err := cgroups.ParseCgroupFile("/proc/self/cgroup")
@@ -212,12 +220,19 @@ func createParentOpt(driver portDriver, stateDir string, enableIPv6 bool) (*pare
 }
 
 func createChildOpt(driver portDriver) (*child.Opt, error) {
-	opt := &child.Opt{}
-	opt.TargetCmd = os.Args
-	opt.PipeFDEnvKey = pipeFD
+	opt := &child.Opt{
+		TargetCmd:                 os.Args,
+		PipeFDEnvKey:              pipeFD,
+		RunActivationHelperEnvKey: runActivationHelperEnv,
+		ChildUseActivationEnvKey:  childUseActivationEnv,
+		StateDirEnvKey:            stateDirEnv,
+	}
 	opt.NetworkDriver = slirp4netns.NewChildDriver()
 	opt.PortDriver = driver.NewChildDriver()
 	opt.CopyUpDirs = []string{"/etc", "/var/run", "/run", "/var/lib"}
+	if copyUpDirs := os.Getenv(copyUpDirsEnv); copyUpDirs != "" {
+		opt.CopyUpDirs = append(opt.CopyUpDirs, strings.Split(copyUpDirs, ",")...)
+	}
 	opt.CopyUpDriver = tmpfssymlink.NewChildDriver()
 	opt.MountProcfs = true
 	opt.Reaper = true
