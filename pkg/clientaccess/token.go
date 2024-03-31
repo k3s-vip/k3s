@@ -6,6 +6,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,9 +17,12 @@ import (
 	"time"
 
 	"github.com/k3s-io/k3s/pkg/kubeadm"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	certutil "github.com/rancher/dynamiclistener/cert"
 	"github.com/sirupsen/logrus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/net"
 )
 
 const (
@@ -44,6 +49,9 @@ var (
 // ClientOption is a callback to mutate the http client prior to use
 type ClientOption func(*http.Client)
 
+// RequestOption is a callback to mutate the http request prior to use
+type RequestOption func(*http.Request)
+
 // Info contains fields that track parsed parts of a cluster join token
 type Info struct {
 	*kubeadm.BootstrapTokenString
@@ -60,8 +68,29 @@ type Info struct {
 // ValidationOption is a callback to mutate the token prior to use
 type ValidationOption func(*Info)
 
+// WithCACertificate overrides the CA cert and hash with certs loaded from the
+// provided file. It is not an error if the file doesn't exist; the client
+// will just follow the normal hash validation steps if so.
+func WithCACertificate(certFile string) ValidationOption {
+	return func(i *Info) {
+		cacerts, err := os.ReadFile(certFile)
+		if err != nil {
+			return
+		}
+
+		digest, _ := hashCA(cacerts)
+		if i.caHash != "" && i.caHash != digest {
+			return
+		}
+
+		i.caHash = digest
+		i.CACerts = cacerts
+	}
+}
+
 // WithClientCertificate configures certs and keys to be used
-// to authenticate the request.
+// to authenticate the request. It is not an error if the files do not
+// exist, client cert auth will not be attempted if so.
 func WithClientCertificate(certFile, keyFile string) ValidationOption {
 	return func(i *Info) {
 		i.CertFile = certFile
@@ -236,7 +265,7 @@ func parseToken(token string) (*Info, error) {
 // If the CA bundle is not empty but does not contain any valid certs, it validates using
 // an empty CA bundle (which will always fail).
 // If valid cert+key paths can be loaded from the provided paths, they are used for client cert auth.
-func GetHTTPClient(cacerts []byte, certFile, keyFile string, option ...ClientOption) *http.Client {
+func GetHTTPClient(cacerts []byte, certFile, keyFile string, options ...any) *http.Client {
 	if len(cacerts) == 0 {
 		return defaultClient
 	}
@@ -261,8 +290,10 @@ func GetHTTPClient(cacerts []byte, certFile, keyFile string, option ...ClientOpt
 		},
 	}
 
-	for _, o := range option {
-		o(client)
+	for _, o := range options {
+		if clientOption, ok := o.(ClientOption); ok {
+			clientOption(client)
+		}
 	}
 	return client
 }
@@ -274,8 +305,14 @@ func WithTimeout(d time.Duration) ClientOption {
 	}
 }
 
+func WithHeader(k, v string) RequestOption {
+	return func(r *http.Request) {
+		r.Header.Add(k, v)
+	}
+}
+
 // Get makes a request to a subpath of info's BaseURL
-func (i *Info) Get(path string, option ...ClientOption) ([]byte, error) {
+func (i *Info) Get(path string, options ...any) ([]byte, error) {
 	u, err := url.Parse(i.BaseURL)
 	if err != nil {
 		return nil, err
@@ -286,11 +323,12 @@ func (i *Info) Get(path string, option ...ClientOption) ([]byte, error) {
 	}
 	p.Scheme = u.Scheme
 	p.Host = u.Host
-	return get(p.String(), GetHTTPClient(i.CACerts, i.CertFile, i.KeyFile, option...), i.Username, i.Password, i.Token())
+	client := GetHTTPClient(i.CACerts, i.CertFile, i.KeyFile, options...)
+	return get(p.String(), client, i.Username, i.Password, i.Token(), options...)
 }
 
 // Put makes a request to a subpath of info's BaseURL
-func (i *Info) Put(path string, body []byte, option ...ClientOption) error {
+func (i *Info) Put(path string, body []byte, options ...any) error {
 	u, err := url.Parse(i.BaseURL)
 	if err != nil {
 		return err
@@ -301,15 +339,33 @@ func (i *Info) Put(path string, body []byte, option ...ClientOption) error {
 	}
 	p.Scheme = u.Scheme
 	p.Host = u.Host
-	return put(p.String(), body, GetHTTPClient(i.CACerts, i.CertFile, i.KeyFile, option...), i.Username, i.Password, i.Token())
+	client := GetHTTPClient(i.CACerts, i.CertFile, i.KeyFile, options...)
+	return put(p.String(), body, client, i.Username, i.Password, i.Token(), options...)
+}
+
+// Post makes a request to a subpath of info's BaseURL
+func (i *Info) Post(path string, body []byte, options ...any) ([]byte, error) {
+	u, err := url.Parse(i.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	p, err := url.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	p.Scheme = u.Scheme
+	p.Host = u.Host
+	client := GetHTTPClient(i.CACerts, i.CertFile, i.KeyFile, options...)
+	return post(p.String(), body, client, i.Username, i.Password, i.Token(), options...)
 }
 
 // setServer sets the BaseURL and CACerts fields of the Info by connecting to the server
-// and storing the CA bundle.
+// and storing the CA bundle. If CACerts has already been set via ValidationOption,
+// retrieval is skipped.
 func (i *Info) setServer(server string) error {
 	url, err := url.Parse(server)
 	if err != nil {
-		return errors.Wrapf(err, "Invalid server url, failed to parse: %s", server)
+		return pkgerrors.WithMessagef(err, "Invalid server url, failed to parse: %s", server)
 	}
 
 	if url.Scheme != "https" {
@@ -320,13 +376,15 @@ func (i *Info) setServer(server string) error {
 		url.Path = url.Path[:len(url.Path)-1]
 	}
 
-	cacerts, err := getCACerts(*url)
-	if err != nil {
-		return err
+	if len(i.CACerts) == 0 {
+		cacerts, err := getCACerts(*url)
+		if err != nil {
+			return err
+		}
+		i.CACerts = cacerts
 	}
 
 	i.BaseURL = url.String()
-	i.CACerts = cacerts
 	return nil
 }
 
@@ -367,7 +425,7 @@ func getCACerts(u url.URL) ([]byte, error) {
 	// Download the CA bundle using a client that does not validate certs.
 	cacerts, err := get(url, insecureClient, "", "", "")
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to get CA certs")
+		return nil, pkgerrors.WithMessage(err, "failed to get CA certs")
 	}
 
 	// Request the CA bundle again, validating that the CA bundle can be loaded
@@ -375,7 +433,7 @@ func getCACerts(u url.URL) ([]byte, error) {
 	// get an empty CA bundle. or if the dynamiclistener cert is incorrectly signed.
 	_, err = get(url, GetHTTPClient(cacerts, "", ""), "", "", "")
 	if err != nil {
-		return nil, errors.Wrap(err, "CA cert validation failed")
+		return nil, pkgerrors.WithMessage(err, "CA cert validation failed")
 	}
 
 	return cacerts, nil
@@ -383,7 +441,7 @@ func getCACerts(u url.URL) ([]byte, error) {
 
 // get makes a request to a url using a provided client and credentials,
 // returning the response body.
-func get(u string, client *http.Client, username, password, token string) ([]byte, error) {
+func get(u string, client *http.Client, username, password, token string, options ...any) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -395,22 +453,23 @@ func get(u string, client *http.Client, username, password, token string) ([]byt
 		req.SetBasicAuth(username, password)
 	}
 
+	for _, o := range options {
+		if requestOption, ok := o.(RequestOption); ok {
+			requestOption(req)
+		}
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("%s: %s", u, resp.Status)
-	}
-
-	return io.ReadAll(resp.Body)
+	return readBody(resp)
 }
 
 // put makes a request to a url using a provided client and credentials,
 // only an error is returned
-func put(u string, body []byte, client *http.Client, username, password, token string) error {
+func put(u string, body []byte, client *http.Client, username, password, token string, options ...any) error {
 	req, err := http.NewRequest(http.MethodPut, u, bytes.NewBuffer(body))
 	if err != nil {
 		return err
@@ -422,18 +481,75 @@ func put(u string, body []byte, client *http.Client, username, password, token s
 		req.SetBasicAuth(username, password)
 	}
 
+	for _, o := range options {
+		if requestOption, ok := o.(RequestOption); ok {
+			requestOption(req)
+		}
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%s: %s %s", u, resp.Status, string(respBody))
+	_, err = readBody(resp)
+	return err
+}
+
+// post makes a request to a url using a provided client and credentials,
+// returning the response body and error.
+func post(u string, body []byte, client *http.Client, username, password, token string, options ...any) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodPost, u, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
 	}
 
-	return nil
+	if token != "" {
+		req.Header.Add("Authorization", "Bearer "+token)
+	} else if username != "" {
+		req.SetBasicAuth(username, password)
+	}
+
+	for _, o := range options {
+		if requestOption, ok := o.(RequestOption); ok {
+			requestOption(req)
+		}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	return readBody(resp)
+}
+
+// readBody attempts to get the body from the response. If the response status
+// code is not in the 2XX range, an error is returned. An attempt is made to
+// decode the error body as a metav1.Status and return a StatusError, if
+// possible.
+func readBody(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	warnings, _ := net.ParseWarningHeaders(resp.Header["Warning"])
+	for _, warning := range warnings {
+		if warning.Code == 299 && len(warning.Text) != 0 {
+			logrus.Warnf("%s", warning.Text)
+		}
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		status := metav1.Status{}
+		if err := json.Unmarshal(b, &status); err == nil && status.Kind == "Status" {
+			return nil, &apierrors.StatusError{ErrStatus: status}
+		}
+		return nil, fmt.Errorf("%s: %s", resp.Request.URL, resp.Status)
+	}
+	return b, nil
 }
 
 // FormatToken takes a username:password string or join token, and a path to a certificate bundle, and
