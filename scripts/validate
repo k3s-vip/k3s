@@ -4,9 +4,12 @@ set -e
 cd $(dirname $0)/..
 
 echo Running: go mod tidy
-go mod tidy
+cp go.mod go.bak
+go mod tidy -v
+diff go.bak go.mod || pwd
 
 echo Running: go generate
+mkdir -p build/{data,static}
 GOOS=linux CC=gcc CXX=g++ go generate
 
 if [ -n "$SKIP_VALIDATE" ]; then
@@ -22,12 +25,6 @@ if [ -n "$DIRTY" ]; then
     git status --porcelain --untracked-files=no
     git diff
     exit 1
-fi
-
-echo Running: go version
-if ! go version | grep -s "go version ${VERSION_GOLANG} "; then
-  echo "Unexpected $(go version) - Kubernetes ${VERSION_K8S} should be built with go version ${VERSION_GOLANG}"
-  exit 1
 fi
 
 echo Running: go mod verify

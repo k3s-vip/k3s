@@ -1,12 +1,9 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"os"
 	"path/filepath"
 
-	"github.com/docker/docker/pkg/reexec"
 	"github.com/k3s-io/k3s/pkg/cli/agent"
 	"github.com/k3s-io/k3s/pkg/cli/cert"
 	"github.com/k3s-io/k3s/pkg/cli/cmds"
@@ -21,10 +18,13 @@ import (
 	"github.com/k3s-io/k3s/pkg/configfilearg"
 	"github.com/k3s-io/k3s/pkg/containerd"
 	ctr2 "github.com/k3s-io/k3s/pkg/ctr"
+	"github.com/k3s-io/k3s/pkg/daemons/executor"
+	"github.com/k3s-io/k3s/pkg/executor/embed"
 	kubectl2 "github.com/k3s-io/k3s/pkg/kubectl"
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	crictl2 "github.com/kubernetes-sigs/cri-tools/cmd/crictl"
-	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
+	"github.com/moby/sys/reexec"
+	"github.com/urfave/cli/v2"
 )
 
 func init() {
@@ -32,6 +32,17 @@ func init() {
 	reexec.Register("kubectl", kubectl2.Main)
 	reexec.Register("crictl", crictl2.Main)
 	reexec.Register("ctr", ctr2.Main)
+}
+
+func initExecutor(af cli.ActionFunc) cli.ActionFunc {
+	return func(app *cli.Context) error {
+		ex, err := embed.New(app.Context, &cmds.AgentConfig)
+		if err != nil {
+			return errors.WithMessage(err, "failed to initialize executor")
+		}
+		executor.Set(ex)
+		return af(app)
+	}
 }
 
 func main() {
@@ -43,9 +54,10 @@ func main() {
 	os.Args[0] = cmd
 
 	app := cmds.NewApp()
-	app.Commands = []cli.Command{
-		cmds.NewServerCommand(server.Run),
-		cmds.NewAgentCommand(agent.Run),
+	app.DisableSliceFlagSeparator = true
+	app.Commands = []*cli.Command{
+		cmds.NewServerCommand(initExecutor(server.Run)),
+		cmds.NewAgentCommand(initExecutor(agent.Run)),
 		cmds.NewKubectlCommand(kubectl.Run),
 		cmds.NewCRICTL(crictl.Run),
 		cmds.NewCtrCommand(ctr.Run),
@@ -57,7 +69,6 @@ func main() {
 			token.Rotate,
 		),
 		cmds.NewEtcdSnapshotCommands(
-			etcdsnapshot.Run,
 			etcdsnapshot.Delete,
 			etcdsnapshot.List,
 			etcdsnapshot.Prune,
@@ -70,15 +81,18 @@ func main() {
 			secretsencrypt.Prepare,
 			secretsencrypt.Rotate,
 			secretsencrypt.Reencrypt,
+			secretsencrypt.RotateKeys,
 		),
 		cmds.NewCertCommands(
+			cert.Check,
 			cert.Rotate,
 			cert.RotateCA,
 		),
-		cmds.NewCompletionCommand(completion.Run),
+		cmds.NewCompletionCommand(
+			completion.Bash,
+			completion.Zsh,
+		),
 	}
 
-	if err := app.Run(configfilearg.MustParse(os.Args)); err != nil && !errors.Is(err, context.Canceled) {
-		logrus.Fatal(err)
-	}
+	cmds.MustRun(app, configfilearg.MustParse(os.Args))
 }
