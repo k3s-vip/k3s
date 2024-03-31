@@ -2,36 +2,39 @@ package server
 
 import (
 	"context"
+	"time"
 
-	helmcrd "github.com/k3s-io/helm-controller/pkg/crd"
 	"github.com/k3s-io/helm-controller/pkg/generated/controllers/helm.cattle.io"
-	addoncrd "github.com/k3s-io/k3s/pkg/crd"
+	addoncrd "github.com/k3s-io/k3s/pkg/crds"
 	"github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/rancher/wrangler/pkg/crd"
 	"github.com/rancher/wrangler/pkg/generated/controllers/apps"
 	"github.com/rancher/wrangler/pkg/generated/controllers/batch"
 	"github.com/rancher/wrangler/pkg/generated/controllers/core"
+	"github.com/rancher/wrangler/pkg/generated/controllers/discovery"
 	"github.com/rancher/wrangler/pkg/generated/controllers/rbac"
 	"github.com/rancher/wrangler/pkg/start"
+	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 )
 
 type Context struct {
-	K3s   *k3s.Factory
-	Helm  *helm.Factory
-	Batch *batch.Factory
-	Apps  *apps.Factory
-	Auth  *rbac.Factory
-	Core  *core.Factory
-	K8s   kubernetes.Interface
-	Event record.EventRecorder
+	K3s       *k3s.Factory
+	Helm      *helm.Factory
+	Batch     *batch.Factory
+	Apps      *apps.Factory
+	Auth      *rbac.Factory
+	Core      *core.Factory
+	Discovery *discovery.Factory
+	K8s       kubernetes.Interface
+	Event     record.EventRecorder
 }
 
 func (c *Context) Start(ctx context.Context) error {
@@ -43,7 +46,7 @@ func NewContext(ctx context.Context, config *Config, forServer bool) (*Context, 
 	if forServer {
 		cfg = config.ControlConfig.Runtime.KubeConfigSupervisor
 	}
-	restConfig, err := clientcmd.BuildConfigFromFlags("", cfg)
+	restConfig, err := util.GetRESTConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -58,37 +61,41 @@ func NewContext(ctx context.Context, config *Config, forServer bool) (*Context, 
 	if forServer {
 		recorder = util.BuildControllerEventRecorder(k8s, version.Program+"-supervisor", metav1.NamespaceAll)
 		if err := registerCrds(ctx, config, restConfig); err != nil {
-			return nil, errors.Wrap(err, "failed to register CRDs")
+			return nil, pkgerrors.WithMessage(err, "failed to register CRDs")
 		}
 	}
 
 	return &Context{
-		K3s:   k3s.NewFactoryFromConfigOrDie(restConfig),
-		Helm:  helm.NewFactoryFromConfigOrDie(restConfig),
-		K8s:   k8s,
-		Auth:  rbac.NewFactoryFromConfigOrDie(restConfig),
-		Apps:  apps.NewFactoryFromConfigOrDie(restConfig),
-		Batch: batch.NewFactoryFromConfigOrDie(restConfig),
-		Core:  core.NewFactoryFromConfigOrDie(restConfig),
-		Event: recorder,
+		K3s:       k3s.NewFactoryFromConfigOrDie(restConfig),
+		Helm:      helm.NewFactoryFromConfigOrDie(restConfig),
+		K8s:       k8s,
+		Auth:      rbac.NewFactoryFromConfigOrDie(restConfig),
+		Apps:      apps.NewFactoryFromConfigOrDie(restConfig),
+		Batch:     batch.NewFactoryFromConfigOrDie(restConfig),
+		Core:      core.NewFactoryFromConfigOrDie(restConfig),
+		Discovery: discovery.NewFactoryFromConfigOrDie(restConfig),
+		Event:     recorder,
 	}, nil
 }
 
+type crdLister func() ([]*apiextv1.CustomResourceDefinition, error)
+
 func registerCrds(ctx context.Context, config *Config, restConfig *rest.Config) error {
-	factory, err := crd.NewFactoryFromClient(restConfig)
+	listers := []crdLister{addoncrd.List}
+
+	crds := []*apiextv1.CustomResourceDefinition{}
+	for _, list := range listers {
+		l, err := list()
+		if err != nil {
+			return err
+		}
+		crds = append(crds, l...)
+	}
+
+	client, err := clientset.NewForConfig(restConfig)
 	if err != nil {
 		return err
 	}
 
-	factory.BatchCreateCRDs(ctx, crds(config)...)
-
-	return factory.BatchWait()
-}
-
-func crds(config *Config) []crd.CRD {
-	defaultCrds := addoncrd.List()
-	if !config.ControlConfig.DisableHelmController {
-		defaultCrds = append(defaultCrds, helmcrd.List()...)
-	}
-	return defaultCrds
+	return crd.BatchCreateCRDs(ctx, client.ApiextensionsV1().CustomResourceDefinitions(), nil, time.Minute, crds)
 }
