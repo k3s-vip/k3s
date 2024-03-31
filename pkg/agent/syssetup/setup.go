@@ -22,7 +22,7 @@ func loadKernelModule(moduleName string) {
 	}
 
 	if err := exec.Command("modprobe", "--", moduleName).Run(); err != nil {
-		logrus.Warnf("Failed to load kernel module %v with modprobe", moduleName)
+		logrus.Warnf("Failed to load kernel module %v with modprobe: %v", moduleName, err)
 	}
 }
 
