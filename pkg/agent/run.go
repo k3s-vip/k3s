@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -19,20 +20,22 @@ import (
 	"github.com/k3s-io/k3s/pkg/agent/proxy"
 	"github.com/k3s-io/k3s/pkg/agent/syssetup"
 	"github.com/k3s-io/k3s/pkg/agent/tunnel"
+	"github.com/k3s-io/k3s/pkg/certmonitor"
 	"github.com/k3s-io/k3s/pkg/cgroups"
 	"github.com/k3s-io/k3s/pkg/cli/cmds"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	cp "github.com/k3s-io/k3s/pkg/cloudprovider"
 	"github.com/k3s-io/k3s/pkg/daemons/agent"
 	daemonconfig "github.com/k3s-io/k3s/pkg/daemons/config"
-	types "github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/daemons/executor"
+	"github.com/k3s-io/k3s/pkg/metrics"
 	"github.com/k3s-io/k3s/pkg/nodeconfig"
+	"github.com/k3s-io/k3s/pkg/profile"
 	"github.com/k3s-io/k3s/pkg/rootless"
 	"github.com/k3s-io/k3s/pkg/spegel"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -45,6 +48,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	toolswatch "k8s.io/client-go/tools/watch"
 	"k8s.io/component-base/cli/globalflag"
+	"k8s.io/component-base/logs"
 	app2 "k8s.io/kubernetes/cmd/kube-proxy/app"
 	kubeproxyconfig "k8s.io/kubernetes/pkg/proxy/apis/config"
 	utilsnet "k8s.io/utils/net"
@@ -54,20 +58,20 @@ import (
 func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 	nodeConfig, err := config.Get(ctx, cfg, proxy)
 	if err != nil {
-		return errors.Wrap(err, "failed to retrieve agent configuration")
+		return pkgerrors.WithMessage(err, "failed to retrieve agent configuration")
 	}
 
 	dualCluster, err := utilsnet.IsDualStackCIDRs(nodeConfig.AgentConfig.ClusterCIDRs)
 	if err != nil {
-		return errors.Wrap(err, "failed to validate cluster-cidr")
+		return pkgerrors.WithMessage(err, "failed to validate cluster-cidr")
 	}
 	dualService, err := utilsnet.IsDualStackCIDRs(nodeConfig.AgentConfig.ServiceCIDRs)
 	if err != nil {
-		return errors.Wrap(err, "failed to validate service-cidr")
+		return pkgerrors.WithMessage(err, "failed to validate service-cidr")
 	}
 	dualNode, err := utilsnet.IsDualStackIPs(nodeConfig.AgentConfig.NodeIPs)
 	if err != nil {
-		return errors.Wrap(err, "failed to validate node-ip")
+		return pkgerrors.WithMessage(err, "failed to validate node-ip")
 	}
 	serviceIPv4 := utilsnet.IsIPv4CIDR(nodeConfig.AgentConfig.ServiceCIDR)
 	clusterIPv4 := utilsnet.IsIPv4CIDR(nodeConfig.AgentConfig.ClusterCIDR)
@@ -96,19 +100,35 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 
 	conntrackConfig, err := getConntrackConfig(nodeConfig)
 	if err != nil {
-		return errors.Wrap(err, "failed to validate kube-proxy conntrack configuration")
+		return pkgerrors.WithMessage(err, "failed to validate kube-proxy conntrack configuration")
 	}
 	syssetup.Configure(enableIPv6, conntrackConfig)
 	nodeConfig.AgentConfig.EnableIPv4 = enableIPv4
 	nodeConfig.AgentConfig.EnableIPv6 = enableIPv6
+
+	if err := executor.Bootstrap(ctx, nodeConfig, cfg); err != nil {
+		return err
+	}
 
 	if nodeConfig.EmbeddedRegistry {
 		if nodeConfig.Docker || nodeConfig.ContainerRuntimeEndpoint != "" {
 			return errors.New("embedded registry mirror requires embedded containerd")
 		}
 
-		if err := spegel.DefaultRegistry.Start(ctx, nodeConfig); err != nil {
-			return errors.Wrap(err, "failed to start embedded registry")
+		if err := spegel.DefaultRegistry.Start(ctx, nodeConfig, executor.CRIReadyChan()); err != nil {
+			return pkgerrors.WithMessage(err, "failed to start embedded registry")
+		}
+	}
+
+	if nodeConfig.SupervisorMetrics {
+		if err := metrics.DefaultMetrics.Start(ctx, nodeConfig); err != nil {
+			return pkgerrors.WithMessage(err, "failed to serve metrics")
+		}
+	}
+
+	if nodeConfig.EnablePProf {
+		if err := profile.DefaultProfiler.Start(ctx, nodeConfig); err != nil {
+			return pkgerrors.WithMessage(err, "failed to serve pprof")
 		}
 	}
 
@@ -116,14 +136,10 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 		return err
 	}
 
-	if err := executor.Bootstrap(ctx, nodeConfig, cfg); err != nil {
-		return err
-	}
-
 	if !nodeConfig.NoFlannel {
 		if (nodeConfig.FlannelExternalIP) && (len(nodeConfig.AgentConfig.NodeExternalIPs) == 0) {
 			logrus.Warnf("Server has flannel-external-ip flag set but this node does not set node-external-ip. Flannel will use internal address when connecting to this node.")
-		} else if (nodeConfig.FlannelExternalIP) && (nodeConfig.FlannelBackend != types.FlannelBackendWireguardNative) && (nodeConfig.FlannelBackend != types.FlannelBackendIPSEC) {
+		} else if (nodeConfig.FlannelExternalIP) && (nodeConfig.FlannelBackend != daemonconfig.FlannelBackendWireguardNative) {
 			logrus.Warnf("Flannel is using external addresses with an insecure backend: %v. Please consider using an encrypting flannel backend.", nodeConfig.FlannelBackend)
 		}
 		if err := flannel.Prepare(ctx, nodeConfig); err != nil {
@@ -142,13 +158,10 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 		if err := executor.Containerd(ctx, nodeConfig); err != nil {
 			return err
 		}
-	}
-	// the container runtime is ready to host workloads when containerd is up and the airgap
-	// images have finished loading, as that portion of startup may block for an arbitrary
-	// amount of time depending on how long it takes to import whatever the user has placed
-	// in the images directory.
-	if cfg.ContainerRuntimeReady != nil {
-		close(cfg.ContainerRuntimeReady)
+	} else {
+		if err := executor.CRI(ctx, nodeConfig); err != nil {
+			return err
+		}
 	}
 
 	notifySocket := os.Getenv("NOTIFY_SOCKET")
@@ -158,21 +171,39 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 		return err
 	}
 
-	if err := util.WaitForAPIServerReady(ctx, nodeConfig.AgentConfig.KubeConfigKubelet, util.DefaultAPIServerReadyTimeout); err != nil {
-		return errors.Wrap(err, "failed to wait for apiserver ready")
-	}
+	go func() {
+		<-executor.APIServerReadyChan()
+		if err := startNetwork(ctx, nodeConfig); err != nil {
+			logrus.Fatalf("Failed to start networking: %v", err)
+		}
 
-	coreClient, err := util.GetClientSet(nodeConfig.AgentConfig.KubeConfigKubelet)
+		// By default, the server is responsible for notifying systemd
+		// On agent-only nodes, the agent will notify systemd
+		if notifySocket != "" {
+			logrus.Info(version.Program + " agent is up and running")
+			os.Setenv("NOTIFY_SOCKET", notifySocket)
+			systemd.SdNotify(true, "READY=1\n")
+		}
+	}()
+
+	return nil
+}
+
+// startNetwork updates the network annotations on the node, and starts flannel
+// and the kube-router netpol controller, if enabled.
+func startNetwork(ctx context.Context, nodeConfig *daemonconfig.Node) error {
+	// Use the kubelet kubeconfig to update annotations on the local node
+	kubeletClient, err := util.GetClientSet(nodeConfig.AgentConfig.KubeConfigKubelet)
 	if err != nil {
 		return err
 	}
 
-	if err := configureNode(ctx, nodeConfig, coreClient.CoreV1().Nodes()); err != nil {
+	if err := configureNode(ctx, nodeConfig, kubeletClient.CoreV1().Nodes()); err != nil {
 		return err
 	}
 
 	if !nodeConfig.NoFlannel {
-		if err := flannel.Run(ctx, nodeConfig, coreClient.CoreV1().Nodes()); err != nil {
+		if err := flannel.Run(ctx, nodeConfig); err != nil {
 			return err
 		}
 	}
@@ -183,16 +214,7 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 		}
 	}
 
-	// By default, the server is responsible for notifying systemd
-	// On agent-only nodes, the agent will notify systemd
-	if notifySocket != "" {
-		logrus.Info(version.Program + " agent is up and running")
-		os.Setenv("NOTIFY_SOCKET", notifySocket)
-		systemd.SdNotify(true, "READY=1\n")
-	}
-
-	<-ctx.Done()
-	return ctx.Err()
+	return nil
 }
 
 // getConntrackConfig uses the kube-proxy code to parse the user-provided kube-proxy-arg values, and
@@ -212,8 +234,8 @@ func getConntrackConfig(nodeConfig *daemonconfig.Node) (*kubeproxyconfig.KubePro
 	}
 
 	cmd := app2.NewProxyCommand()
-	globalflag.AddGlobalFlags(cmd.Flags(), cmd.Name())
-	if err := cmd.ParseFlags(daemonconfig.GetArgs(map[string]string{}, nodeConfig.AgentConfig.ExtraKubeProxyArgs)); err != nil {
+	globalflag.AddGlobalFlags(cmd.Flags(), cmd.Name(), logs.SkipLoggingConfigurationFlags())
+	if err := cmd.ParseFlags(util.GetArgs(map[string]string{}, nodeConfig.AgentConfig.ExtraKubeProxyArgs)); err != nil {
 		return nil, err
 	}
 	maxPerCore, err := cmd.Flags().GetInt32("conntrack-max-per-core")
@@ -241,8 +263,7 @@ func getConntrackConfig(nodeConfig *daemonconfig.Node) (*kubeproxyconfig.KubePro
 
 // RunStandalone bootstraps the executor, but does not run the kubelet or containerd.
 // This allows other bits of code that expect the executor to be set up properly to function
-// even when the agent is disabled. It will only return in case of error or context
-// cancellation.
+// even when the agent is disabled.
 func RunStandalone(ctx context.Context, cfg cmds.Agent) error {
 	proxy, err := createProxyAndValidateToken(ctx, &cfg)
 	if err != nil {
@@ -251,35 +272,49 @@ func RunStandalone(ctx context.Context, cfg cmds.Agent) error {
 
 	nodeConfig, err := config.Get(ctx, cfg, proxy)
 	if err != nil {
-		return errors.Wrap(err, "failed to retrieve agent configuration")
+		return pkgerrors.WithMessage(err, "failed to retrieve agent configuration")
 	}
 
 	if err := executor.Bootstrap(ctx, nodeConfig, cfg); err != nil {
 		return err
 	}
 
-	if cfg.ContainerRuntimeReady != nil {
-		close(cfg.ContainerRuntimeReady)
+	// this is a no-op just to get the cri ready channel closed
+	if err := executor.CRI(ctx, nodeConfig); err != nil {
+		return err
 	}
 
 	if err := tunnelSetup(ctx, nodeConfig, cfg, proxy); err != nil {
 		return err
 	}
+	if err := certMonitorSetup(ctx, nodeConfig, cfg); err != nil {
+		return err
+	}
 
-	<-ctx.Done()
-	return ctx.Err()
+	if nodeConfig.SupervisorMetrics {
+		if err := metrics.DefaultMetrics.Start(ctx, nodeConfig); err != nil {
+			return pkgerrors.WithMessage(err, "failed to serve metrics")
+		}
+	}
+
+	if nodeConfig.EnablePProf {
+		if err := profile.DefaultProfiler.Start(ctx, nodeConfig); err != nil {
+			return pkgerrors.WithMessage(err, "failed to serve pprof")
+		}
+	}
+
+	return nil
 }
 
 // Run sets up cgroups, configures the LB proxy, and triggers startup
-// of containerd and kubelet. It will only return in case of error or context
-// cancellation.
+// of containerd and kubelet.
 func Run(ctx context.Context, cfg cmds.Agent) error {
 	if err := cgroups.Validate(); err != nil {
 		return err
 	}
 
 	if cfg.Rootless && !cfg.RootlessAlreadyUnshared {
-		dualNode, err := utilsnet.IsDualStackIPStrings(cfg.NodeIP)
+		dualNode, err := utilsnet.IsDualStackIPStrings(cfg.NodeIP.Value())
 		if err != nil {
 			return err
 		}
@@ -304,7 +339,7 @@ func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Pr
 	if err := os.MkdirAll(agentDir, 0700); err != nil {
 		return nil, err
 	}
-	isIPv6 := utilsnet.IsIPv6(net.ParseIP([]string{cfg.NodeIP.String()}[0]))
+	isIPv6 := utilsnet.IsIPv6(net.ParseIP(util.GetFirstValidIPString(cfg.NodeIP.Value())))
 
 	proxy, err := proxy.NewSupervisorProxy(ctx, !cfg.DisableLoadBalancer, agentDir, cfg.ServerURL, cfg.LBServerPort, isIPv6)
 	if err != nil {
@@ -319,7 +354,7 @@ func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Pr
 	for {
 		newToken, err := clientaccess.ParseAndValidateToken(proxy.SupervisorURL(), cfg.Token, options...)
 		if err != nil {
-			logrus.Error(err)
+			logrus.Errorf("Failed to validate connection to cluster at %s: %v", cfg.ServerURL, err)
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -398,7 +433,7 @@ func configureNode(ctx context.Context, nodeConfig *daemonconfig.Node, nodes typ
 	}
 
 	if _, err := toolswatch.UntilWithSync(ctx, lw, &v1.Node{}, nil, condition); err != nil {
-		return errors.Wrap(err, "failed to configure node")
+		return pkgerrors.WithMessage(err, "failed to configure node")
 	}
 	return nil
 }
@@ -461,71 +496,78 @@ func updateAddressAnnotations(nodeConfig *daemonconfig.Node, nodeAnnotations map
 		}
 	}
 
+	if len(agentConfig.NodeInternalDNSs) > 0 {
+		result[cp.InternalDNSKey] = strings.Join(agentConfig.NodeInternalDNSs, ",")
+	} else {
+		delete(result, cp.InternalDNSKey)
+	}
+	if len(agentConfig.NodeExternalDNSs) > 0 {
+		result[cp.ExternalDNSKey] = strings.Join(agentConfig.NodeExternalDNSs, ",")
+	} else {
+		delete(result, cp.ExternalDNSKey)
+	}
+
 	result = labels.Merge(nodeAnnotations, result)
 	return result, !equality.Semantic.DeepEqual(nodeAnnotations, result)
 }
 
-// setupTunnelAndRunAgent should start the setup tunnel before starting kubelet and kubeproxy
-// there are special case for etcd agents, it will wait until it can find the apiaddress from
-// the address channel and update the proxy with the servers addresses, if in rke2 we need to
-// start the agent before the tunnel is setup to allow kubelet to start first and start the pods
+// setupTunnelAndRunAgent starts the agent tunnel, cert expiry monitoring, and
+// runs the Agent (cri+kubelet). On etcd-only nodes, an extra goroutine is
+// started to retrieve apiserver addresses from the datastore. On other node
+// types, this is done later by the tunnel setup, which starts goroutines to
+// watch apiserver endpoints.
 func setupTunnelAndRunAgent(ctx context.Context, nodeConfig *daemonconfig.Node, cfg cmds.Agent, proxy proxy.Proxy) error {
-	var agentRan bool
-	// IsAPIServerLBEnabled is used as a shortcut for detecting RKE2, where the kubelet needs to
-	// be run earlier in order to manage static pods. This should probably instead query a
-	// flag on the executor or something.
+	// only need to get apiserver addresses from the datastore on an etcd-only node that is not being reset
 	if !cfg.ClusterReset && cfg.ETCDAgent {
-		// ETCDAgent is only set to true on servers that are started with --disable-apiserver.
-		// In this case, we may be running without an apiserver available in the cluster, and need
-		// to wait for one to register and post it's address into APIAddressCh so that we can update
-		// the LB proxy with its address.
-		if proxy.IsAPIServerLBEnabled() {
-			// On RKE2, the agent needs to be started early to run the etcd static pod.
-			if err := agent.Agent(ctx, nodeConfig, proxy); err != nil {
-				return err
-			}
-			agentRan = true
-		}
-		if err := waitForAPIServerAddresses(ctx, nodeConfig, cfg, proxy); err != nil {
-			return err
-		}
-	} else if cfg.ClusterReset && proxy.IsAPIServerLBEnabled() {
-		// If we're doing a cluster-reset on RKE2, the kubelet needs to be started early to clean
-		// up static pods.
-		if err := agent.Agent(ctx, nodeConfig, proxy); err != nil {
-			return err
-		}
-		agentRan = true
+		go waitForAPIServerAddresses(ctx, nodeConfig, cfg, proxy)
 	}
 
 	if err := tunnelSetup(ctx, nodeConfig, cfg, proxy); err != nil {
 		return err
 	}
-	if !agentRan {
-		return agent.Agent(ctx, nodeConfig, proxy)
+
+	if err := certMonitorSetup(ctx, nodeConfig, cfg); err != nil {
+		return err
 	}
-	return nil
+
+	return agent.Agent(ctx, nodeConfig, proxy)
 }
 
-func waitForAPIServerAddresses(ctx context.Context, nodeConfig *daemonconfig.Node, cfg cmds.Agent, proxy proxy.Proxy) error {
+// waitForAPIServerAddresses syncs apiserver addresses from the datastore. This
+// is also handled by the agent tunnel watch, but on etcd-only nodes we need to
+// read apiserver addresses from APIAddressCh before the agent has a
+// connection to the apiserver. This does not return until addresses or set,
+// or the context is cancelled.
+func waitForAPIServerAddresses(ctx context.Context, nodeConfig *daemonconfig.Node, cfg cmds.Agent, proxy proxy.Proxy) {
+	var localSupervisorDefault bool
+	if addresses := proxy.SupervisorAddresses(); len(addresses) > 0 {
+		host, _, _ := net.SplitHostPort(addresses[0])
+		if host == "127.0.0.1" || host == "::1" {
+			localSupervisorDefault = true
+		}
+	}
+
 	for {
 		select {
 		case <-time.After(5 * time.Second):
-			logrus.Info("Waiting for apiserver addresses")
+			logrus.Info("Waiting for control-plane node to register apiserver addresses in etcd")
 		case addresses := <-cfg.APIAddressCh:
 			for i, a := range addresses {
 				host, _, err := net.SplitHostPort(a)
 				if err == nil {
 					addresses[i] = net.JoinHostPort(host, strconv.Itoa(nodeConfig.ServerHTTPSPort))
-					if i == 0 {
-						proxy.SetSupervisorDefault(addresses[i])
-					}
 				}
 			}
+			// If this is an etcd-only node that started up using its local supervisor,
+			// switch to using a control-plane node as the supervisor. Otherwise, leave the
+			// configured server address as the default.
+			if localSupervisorDefault && len(addresses) > 0 {
+				proxy.SetSupervisorDefault(addresses[0])
+			}
 			proxy.Update(addresses)
-			return nil
+			return
 		case <-ctx.Done():
-			return ctx.Err()
+			return
 		}
 	}
 }
@@ -538,6 +580,13 @@ func tunnelSetup(ctx context.Context, nodeConfig *daemonconfig.Node, cfg cmds.Ag
 		return nil
 	}
 	return tunnel.Setup(ctx, nodeConfig, proxy)
+}
+
+func certMonitorSetup(ctx context.Context, nodeConfig *daemonconfig.Node, cfg cmds.Agent) error {
+	if cfg.ClusterReset {
+		return nil
+	}
+	return certmonitor.Setup(ctx, nodeConfig, cfg.DataDir)
 }
 
 // getHostname returns the actual system hostname.
