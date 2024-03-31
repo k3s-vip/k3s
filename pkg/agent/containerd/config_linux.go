@@ -1,10 +1,12 @@
 //go:build linux
-// +build linux
 
 package containerd
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 
 	"github.com/containerd/containerd"
 	overlayutils "github.com/containerd/containerd/snapshots/overlay/overlayutils"
@@ -15,8 +17,8 @@ import (
 	"github.com/k3s-io/k3s/pkg/cgroups"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/opencontainers/runc/libcontainer/userns"
-	"github.com/pkg/errors"
+	"github.com/moby/sys/userns"
+	"github.com/pdtpartners/nix-snapshotter/pkg/nix"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 	"k8s.io/kubernetes/pkg/kubelet/util"
@@ -24,13 +26,22 @@ import (
 
 const (
 	socketPrefix = "unix://"
-	runtimesPath = "/usr/local/nvidia/toolkit:/opt/kwasm/bin:/usr/sbin:/usr/local/sbin:/usr/bin:/usr/local/bin"
+	runtimesPath = "/usr/local/nvidia/toolkit:/opt/kwasm/bin"
 )
+
+// hostDirectory returns the name of the host dir for a given registry.
+// This is a no-op on linux, as all possible host:port strings are valid paths.
+func hostDirectory(host string) string {
+	return host
+}
 
 func getContainerdArgs(cfg *config.Node) []string {
 	args := []string{
 		"containerd",
 		"-c", cfg.Containerd.Config,
+	// Historically the linux containerd config template did not include
+	// address/state/root settings, so they need to be passed on the command line
+	// in case the user-provided template still lacks them.
 		"-a", cfg.Containerd.Address,
 		"--state", cfg.Containerd.State,
 		"--root", cfg.Containerd.Root,
@@ -55,16 +66,16 @@ func SetupContainerdConfig(cfg *config.Node) error {
 		cfg.AgentConfig.Systemd = !isRunningInUserNS && controllers["cpuset"] && os.Getenv("INVOCATION_ID") != ""
 	}
 
-	// set the path to include the runtimes and then remove the aditional path entries
+	// set the path to include the default runtimes and remove the aditional path entries
 	// that we added after finding the runtimes
 	originalPath := os.Getenv("PATH")
-	os.Setenv("PATH", runtimesPath)
+	os.Setenv("PATH", runtimesPath+string(os.PathListSeparator)+originalPath)
 	extraRuntimes := findContainerRuntimes()
 	os.Setenv("PATH", originalPath)
 
 	// Verifies if the DefaultRuntime can be found
 	if _, ok := extraRuntimes[cfg.DefaultRuntime]; !ok && cfg.DefaultRuntime != "" {
-		return errors.Errorf("default runtime %s was not found", cfg.DefaultRuntime)
+		return fmt.Errorf("default runtime %s was not found", cfg.DefaultRuntime)
 	}
 
 	containerdConfig := templates.ContainerdConfig{
@@ -73,6 +84,7 @@ func SetupContainerdConfig(cfg *config.Node) error {
 		SystemdCgroup:         cfg.AgentConfig.Systemd,
 		IsRunningInUserNS:     isRunningInUserNS,
 		EnableUnprivileged:    kernel.CheckKernelVersion(4, 11, 0),
+		NonrootDevices:        cfg.Containerd.NonrootDevices,
 		PrivateRegistryConfig: cfg.AgentConfig.Registry,
 		ExtraRuntimes:         extraRuntimes,
 		Program:               version.Program,
@@ -81,7 +93,7 @@ func SetupContainerdConfig(cfg *config.Node) error {
 
 	selEnabled, selConfigured, err := selinuxStatus()
 	if err != nil {
-		return errors.Wrap(err, "failed to detect selinux")
+		return fmt.Errorf("failed to detect selinux: %w", err)
 	}
 	switch {
 	case !cfg.SELinux && selEnabled:
@@ -116,4 +128,11 @@ func FuseoverlayfsSupported(root string) error {
 
 func StargzSupported(root string) error {
 	return stargz.Supported(root)
+}
+
+func NixSupported(root string) error {
+	if _, err := exec.LookPath("nix-store"); err != nil {
+		return errors.New("nix-store not found in PATH: install nix (https://nixos.org/download) to use the nix snapshotter")
+	}
+	return nix.Supported(root)
 }
