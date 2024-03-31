@@ -20,7 +20,6 @@ import (
 const maxBootstrapWaitAttempts = 5
 
 func RotateBootstrapToken(ctx context.Context, config *config.Control, oldToken string) error {
-
 	token, err := util.ReadTokenFromFile(config.Runtime.ServerToken, config.Runtime.ServerCA, config.DataDir)
 	if err != nil {
 		return err
@@ -118,7 +117,7 @@ func Save(ctx context.Context, config *config.Control, override bool) error {
 			}
 			logrus.Warn("Bootstrap key already exists")
 			return nil
-		} else if errors.Is(err, rpctypes.ErrGPRCNotSupportedForLearner) {
+		} else if errors.Is(err, rpctypes.ErrGRPCNotSupportedForLearner) {
 			logrus.Debug("Skipping bootstrap data save on learner")
 			return nil
 		}
@@ -151,8 +150,21 @@ func bootstrapKeyData(ctx context.Context, storageClient client.Client) (*client
 // bootstrap key as a lock. This function will not return successfully until either the
 // bootstrap key has been locked, or data is read into the struct.
 func (c *Cluster) storageBootstrap(ctx context.Context) error {
-	if err := c.startStorage(ctx); err != nil {
-		return err
+	if c.config.KineTLS {
+		bootstrapCtx, cancel := context.WithCancel(ctx)
+		defer func() {
+			time.Sleep(time.Second)
+			cancel()
+		}()
+
+		logrus.Info("Starting temporary kine to reconcile with datastore")
+		if err := c.startStorage(bootstrapCtx, true); err != nil {
+			return err
+		}
+	} else {
+		if err := c.startStorage(ctx, true); err != nil {
+			return err
+		}
 	}
 
 	storageClient, err := client.New(c.config.Runtime.EtcdConfig)
@@ -174,6 +186,13 @@ func (c *Cluster) storageBootstrap(ctx context.Context) error {
 			// that's AFTER generating CA certs and tokens. If the config is updated to set the
 			// matching key, further startups will still be blocked pending cleanup of the
 			// "newer" files as per the bootstrap reconciliation code.
+
+			_, err = getBootstrapValues(ctx, storageClient)
+			if err != nil {
+				return err
+			}
+			logrus.Info("Datastore connection validated successfully, proceeding with bootstrap data generation")
+
 			c.saveBootstrap = true
 			return nil
 		}
@@ -186,8 +205,12 @@ func (c *Cluster) storageBootstrap(ctx context.Context) error {
 
 	attempts := 0
 	tokenKey := storageKey(normalizedToken)
-	return wait.PollImmediateUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
+	return wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
 		attempts++
+
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
 		value, saveBootstrap, err := getBootstrapKeyFromStorage(ctx, storageClient, normalizedToken, token)
 		c.saveBootstrap = saveBootstrap
 		if err != nil {
@@ -234,6 +257,48 @@ func (c *Cluster) storageBootstrap(ctx context.Context) error {
 	})
 }
 
+// getBootstrapData makes a single attempt to retrieve and decrypt bootstrap data from the datastore.
+func (c *Cluster) getBootstrapData(ctx context.Context, token string) ([]byte, error) {
+	storageClient, err := client.New(c.config.Runtime.EtcdConfig)
+	if err != nil {
+		return nil, err
+	}
+	defer storageClient.Close()
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	value, err := storageClient.Get(ctx, storageKey(token))
+	if err != nil {
+		return nil, err
+	}
+
+	return decrypt(token, value.Data)
+}
+
+// getBootstrapValues returns the value of all keys under the "/bootstrap" prefix, with a 10 second timeout.
+func getBootstrapValues(ctx context.Context, storageClient client.Client) ([]client.Value, error) {
+	var bootstrapList []client.Value
+	var err error
+
+	if err := wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
+		operationCtx, operationCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer operationCancel()
+
+		bootstrapList, err = storageClient.List(operationCtx, "/bootstrap", 0)
+		if err != nil {
+			if errors.Is(err, rpctypes.ErrGRPCNotSupportedForLearner) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	}); err != nil {
+		return nil, err
+	}
+	return bootstrapList, nil
+}
+
 // getBootstrapKeyFromStorage will list all keys that has prefix /bootstrap and will check for key that is
 // hashed with empty string and will check for any key that is hashed by different token than the one
 // passed to it, it will return error if it finds a key that is hashed with different token and will return
@@ -243,19 +308,8 @@ func getBootstrapKeyFromStorage(ctx context.Context, storageClient client.Client
 	emptyStringKey := storageKey("")
 	tokenKey := storageKey(normalizedToken)
 
-	var bootstrapList []client.Value
-	var err error
-
-	if err := wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
-		bootstrapList, err = storageClient.List(ctx, "/bootstrap", 0)
-		if err != nil {
-			if errors.Is(err, rpctypes.ErrGPRCNotSupportedForLearner) {
-				return false, nil
-			}
-			return false, err
-		}
-		return true, nil
-	}); err != nil {
+	bootstrapList, err := getBootstrapValues(ctx, storageClient)
+	if err != nil {
 		return nil, false, err
 	}
 
@@ -329,7 +383,7 @@ func doMigrateToken(ctx context.Context, storageClient client.Client, keyValue c
 	if err := storageClient.Create(ctx, newTokenKey, encryptedData); err != nil {
 		if err.Error() == "key exists" {
 			logrus.Warn("bootstrap key exists")
-		} else if errors.Is(err, rpctypes.ErrGPRCNotSupportedForLearner) {
+		} else if errors.Is(err, rpctypes.ErrGRPCNotSupportedForLearner) {
 			logrus.Debug("skipping bootstrap data save on learner")
 			return nil
 		} else {
