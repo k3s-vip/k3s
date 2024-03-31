@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 package containerd
 
@@ -70,6 +69,10 @@ func findNvidiaContainerRuntimes(foundRuntimes runtimeConfigs) {
 		"nvidia-experimental": {
 			RuntimeType: "io.containerd.runc.v2",
 			BinaryName:  "nvidia-container-runtime-experimental",
+		},
+		"nvidia-cdi": {
+			RuntimeType: "io.containerd.runc.v2",
+			BinaryName:  "nvidia-container-runtime.cdi",
 		},
 	}
 
