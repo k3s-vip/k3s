@@ -15,18 +15,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/k3s-io/k3s/pkg/agent/util"
 	apisv1 "github.com/k3s-io/k3s/pkg/apis/k3s.cattle.io/v1"
 	controllersv1 "github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io/v1"
+	"github.com/k3s-io/k3s/pkg/agent/util"
 	pkgutil "github.com/k3s-io/k3s/pkg/util"
-	errors2 "github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/rancher/wrangler/pkg/apply"
 	"github.com/rancher/wrangler/pkg/kv"
 	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/rancher/wrangler/pkg/objectset"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -120,6 +119,26 @@ func (w *watcher) listFilesIn(base string, force bool) error {
 		if err != nil {
 			return err
 		}
+		// Descend into symlinked directories, however, only top-level links are followed
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkInfo, err := os.Stat(path)
+			if err != nil {
+				return err
+			}
+			if linkInfo.IsDir() {
+				evalPath, err := filepath.EvalSymlinks(path)
+				if err != nil {
+					return err
+				}
+				filepath.Walk(evalPath, func(path string, info os.FileInfo, err error) error {
+					if err != nil {
+						return err
+					}
+					files[path] = info
+					return nil
+				})
+			}
+		}
 		files[path] = info
 		return nil
 	}); err != nil {
@@ -146,7 +165,7 @@ func (w *watcher) listFilesIn(base string, force bool) error {
 		// Disabled files are not just skipped, but actively deleted from the filesystem
 		if shouldDisableFile(base, path, w.disables) {
 			if err := w.delete(path); err != nil {
-				errs = append(errs, errors2.Wrapf(err, "failed to delete %s", path))
+				errs = append(errs, pkgerrors.WithMessagef(err, "failed to delete %s", path))
 			}
 			continue
 		}
@@ -159,7 +178,7 @@ func (w *watcher) listFilesIn(base string, force bool) error {
 			continue
 		}
 		if err := w.deploy(path, !force); err != nil {
-			errs = append(errs, errors2.Wrapf(err, "failed to process %s", path))
+			errs = append(errs, pkgerrors.WithMessagef(err, "failed to process %s", path))
 		} else {
 			w.modTime[path] = modTime
 		}
@@ -284,26 +303,30 @@ func (w *watcher) delete(path string) error {
 		return err
 	}
 
-	// ensure that the addon is completely removed before deleting the objectSet,
-	// so return when err == nil, otherwise pods may get stuck terminating
-	w.recorder.Eventf(&addon, corev1.EventTypeNormal, "DeletingManifest", "Deleting manifest at %q", path)
-	if err := w.addons.Delete(addon.Namespace, addon.Name, &metav1.DeleteOptions{}); err == nil || !errors.IsNotFound(err) {
-		return err
-	}
-
-	// apply an empty set with owner & gvk data to delete
+	// Apply an empty set with owner & gvk data to delete
 	if err := w.apply.WithOwner(&addon).WithGVK(addonGVKs...).ApplyObjects(); err != nil {
 		return err
 	}
 
-	return os.Remove(path)
+	// Remove the addon file
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+
+	// Delete the addon
+	w.recorder.Eventf(&addon, corev1.EventTypeNormal, "DeletingManifest", "Deleting manifest at %q", path)
+	if err := w.addons.Delete(addon.Namespace, addon.Name, &metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	return nil
 }
 
 // getOrCreateAddon attempts to get an Addon by name from the addon namespace, and creates a new one
 // if it cannot be found.
 func (w *watcher) getOrCreateAddon(name string) (apisv1.Addon, error) {
 	addon, err := w.addonCache.Get(metav1.NamespaceSystem, name)
-	if errors.IsNotFound(err) {
+	if apierrors.IsNotFound(err) {
 		addon = apisv1.NewAddon(metav1.NamespaceSystem, name, apisv1.Addon{})
 	} else if err != nil {
 		return apisv1.Addon{}, err

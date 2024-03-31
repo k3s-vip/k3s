@@ -20,10 +20,9 @@ type Driver interface {
 	IsReset() (bool, error)
 	ResetFile() string
 	Start(ctx context.Context, clientAccessInfo *clientaccess.Info) error
-	Test(ctx context.Context) error
 	Restore(ctx context.Context) error
 	EndpointName() string
-	Snapshot(ctx context.Context) error
+	Snapshot(ctx context.Context) (*SnapshotResult, error)
 	ReconcileSnapshotData(ctx context.Context) error
 	GetMembersClientURLs(ctx context.Context) ([]string, error)
 	RemoveSelf(ctx context.Context) error
@@ -39,4 +38,15 @@ func Registered() []Driver {
 
 func Default() Driver {
 	return drivers[0]
+}
+
+func Clear() {
+	drivers = []Driver{}
+}
+
+// SnapshotResult is returned by the Snapshot function,
+// and lists the names of created and deleted snapshots.
+type SnapshotResult struct {
+	Created []string `json:"created,omitempty"`
+	Deleted []string `json:"deleted,omitempty"`
 }
