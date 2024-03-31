@@ -16,6 +16,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/agent/cri"
 	"github.com/k3s-io/k3s/pkg/cgroups"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/sirupsen/logrus"
 
 	utilsnet "k8s.io/utils/net"
@@ -53,6 +54,11 @@ func getDockerCRIArgs(cfg *config.Node) []string {
 	argsMap := map[string]string{
 		"container-runtime-endpoint": cfg.CRIDockerd.Address,
 		"cri-dockerd-root-directory": cfg.CRIDockerd.Root,
+		"streaming-bind-addr":        "127.0.0.1:10010",
+	}
+
+	if cfg.CRIDockerd.Debug {
+		argsMap["log-level"] = "debug"
 	}
 
 	if dualNode, _ := utilsnet.IsDualStackIPs(cfg.AgentConfig.NodeIPs); dualNode {
@@ -89,5 +95,5 @@ func getDockerCRIArgs(cfg *config.Node) []string {
 		argsMap["runtime-cgroups"] = runtimeRoot
 	}
 
-	return config.GetArgs(argsMap, nil)
+	return util.GetArgs(argsMap, nil)
 }
