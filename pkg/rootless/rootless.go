@@ -1,9 +1,10 @@
 //go:build !windows
-// +build !windows
 
 package rootless
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -12,11 +13,11 @@ import (
 	"strings"
 
 	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"github.com/pkg/errors"
-	"github.com/rootless-containers/rootlesskit/pkg/child"
-	"github.com/rootless-containers/rootlesskit/pkg/copyup/tmpfssymlink"
-	"github.com/rootless-containers/rootlesskit/pkg/network/slirp4netns"
-	"github.com/rootless-containers/rootlesskit/pkg/parent"
+	pkgerrors "github.com/pkg/errors"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/child"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/copyup/tmpfssymlink"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/network/slirp4netns"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/parent"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
@@ -32,6 +33,7 @@ var (
 	enableIPv6Env      = "K3S_ROOTLESS_ENABLE_IPV6"
 	portDriverEnv      = "K3S_ROOTLESS_PORT_DRIVER"
 	disableLoopbackEnv = "K3S_ROOTLESS_DISABLE_HOST_LOOPBACK"
+	copyUpDirsEnv      = "K3S_ROOTLESS_COPYUPDIRS"
 )
 
 func Rootless(stateDir string, enableIPv6 bool) error {
@@ -78,6 +80,8 @@ func Rootless(stateDir string, enableIPv6 bool) error {
 	if err := parent.Parent(*parentOpt); err != nil {
 		logrus.Fatal(err)
 	}
+
+	//revive:disable-next-line:deep-exit
 	os.Exit(0)
 
 	return nil
@@ -96,7 +100,7 @@ func validateSysctl() error {
 	for key, expectedValue := range expected {
 		if actualValue, err := readSysctl(key); err == nil {
 			if expectedValue != actualValue {
-				return errors.Errorf("expected sysctl value %q to be %q, got %q; try adding \"%s=%s\" to /etc/sysctl.conf and running `sudo sysctl --system`",
+				return fmt.Errorf("expected sysctl value %q to be %q, got %q; try adding \"%s=%s\" to /etc/sysctl.conf and running `sudo sysctl --system`",
 					key, expectedValue, actualValue, key, expectedValue)
 			}
 		}
@@ -122,14 +126,14 @@ func parseCIDR(s string) (*net.IPNet, error) {
 		return nil, err
 	}
 	if !ip.Equal(ipnet.IP) {
-		return nil, errors.Errorf("cidr must be like 10.0.2.0/24, not like 10.0.2.100/24")
+		return nil, errors.New("host identifier bits must not be set in CIDR prefix")
 	}
 	return ipnet, nil
 }
 
 func createParentOpt(driver portDriver, stateDir string, enableIPv6 bool) (*parent.Opt, error) {
 	if err := os.MkdirAll(stateDir, 0755); err != nil {
-		return nil, errors.Wrapf(err, "failed to mkdir %s", stateDir)
+		return nil, pkgerrors.WithMessagef(err, "failed to mkdir %s", stateDir)
 	}
 
 	driver.SetStateDir(stateDir)
@@ -218,6 +222,9 @@ func createChildOpt(driver portDriver) (*child.Opt, error) {
 	opt.NetworkDriver = slirp4netns.NewChildDriver()
 	opt.PortDriver = driver.NewChildDriver()
 	opt.CopyUpDirs = []string{"/etc", "/var/run", "/run", "/var/lib"}
+	if copyUpDirs := os.Getenv(copyUpDirsEnv); copyUpDirs != "" {
+		opt.CopyUpDirs = append(opt.CopyUpDirs, strings.Split(copyUpDirs, ",")...)
+	}
 	opt.CopyUpDriver = tmpfssymlink.NewChildDriver()
 	opt.MountProcfs = true
 	opt.Reaper = true

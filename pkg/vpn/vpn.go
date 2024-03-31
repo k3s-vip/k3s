@@ -2,14 +2,16 @@ package vpn
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 
 	"github.com/k3s-io/k3s/pkg/util"
 
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -19,15 +21,21 @@ const (
 
 type TailscaleOutput struct {
 	TailscaleIPs []string `json:"TailscaleIPs"`
+	BackendState string   `json:"BackendState"`
 }
 
-// VPNInfo includes node information of the VPN. It is a general struct in case we want to add more vpn integrations
-type VPNInfo struct {
+type TailscalePrefsOutput struct {
+	AdvertiseRoutes []netip.Prefix `json:"AdvertiseRoutes"`
+}
+
+// Info includes node information of the VPN. It is a general struct in case we want to add more vpn integrations
+type Info struct {
+	BackendState string
 	IPv4Address  net.IP
 	IPv6Address  net.IP
 	NodeID       string
 	ProviderName string
-	VPNInterface string
+	Interface    string
 }
 
 // vpnCliAuthInfo includes auth information of the VPN. It is a general struct in case we want to add more vpn integrations
@@ -48,6 +56,11 @@ func StartVPN(vpnAuthConfigFile string) error {
 	logrus.Infof("Starting VPN: %s", authInfo.Name)
 	switch authInfo.Name {
 	case "tailscale":
+		vpnInfo, err := getTailscaleInfo()
+		if err == nil && vpnInfo.BackendState == "Running" {
+			logrus.Debugf("Tailscale is already running, skipping tailscale up")
+			return nil
+		}
 		args := []string{
 			"up", "--authkey", authInfo.JoinKey, "--timeout=30s", "--reset",
 		}
@@ -60,7 +73,7 @@ func StartVPN(vpnAuthConfigFile string) error {
 		logrus.Debugf("Flags passed to tailscale up: %v", args)
 		output, err := util.ExecCommand("tailscale", args)
 		if err != nil {
-			return errors.Wrap(err, "tailscale up failed: "+output)
+			return pkgerrors.WithMessage(err, "tailscale up failed: "+output)
 		}
 		logrus.Debugf("Output from tailscale up: %v", output)
 		return nil
@@ -69,17 +82,17 @@ func StartVPN(vpnAuthConfigFile string) error {
 	}
 }
 
-// GetVPNInfo returns a VPNInfo object with details about the VPN. General function in case we want to add more vpn integrations
-func GetVPNInfo(vpnAuth string) (VPNInfo, error) {
+// GetInfo returns an Info object with details about the VPN. General function in case we want to add more vpn integrations
+func GetInfo(vpnAuth string) (*Info, error) {
 	authInfo, err := getVPNAuthInfo(vpnAuth)
 	if err != nil {
-		return VPNInfo{}, err
+		return nil, err
 	}
 
 	if authInfo.Name == "tailscale" {
 		return getTailscaleInfo()
 	}
-	return VPNInfo{}, nil
+	return nil, nil
 }
 
 // getVPNAuthInfo returns the required authInfo object
@@ -129,10 +142,10 @@ func isVPNConfigOK(authInfo vpnCliAuthInfo) error {
 }
 
 // getTailscaleInfo returns the IPs of the interface
-func getTailscaleInfo() (VPNInfo, error) {
+func getTailscaleInfo() (*Info, error) {
 	output, err := util.ExecCommand("tailscale", []string{"status", "--json"})
 	if err != nil {
-		return VPNInfo{}, fmt.Errorf("failed to run tailscale status --json: %v", err)
+		return nil, fmt.Errorf("failed to run tailscale status --json: %v", err)
 	}
 
 	logrus.Debugf("Output from tailscale status --json: %v", output)
@@ -140,14 +153,32 @@ func getTailscaleInfo() (VPNInfo, error) {
 	var tailscaleOutput TailscaleOutput
 	err = json.Unmarshal([]byte(output), &tailscaleOutput)
 	if err != nil {
-		return VPNInfo{}, fmt.Errorf("failed to unmarshal tailscale output: %v", err)
+		return nil, fmt.Errorf("failed to unmarshal tailscale output: %v", err)
 	}
 
 	// Errors are ignored because the interface might not have ipv4 or ipv6 addresses (that's the only possible error)
 	ipv4Address, _ := util.GetFirst4String(tailscaleOutput.TailscaleIPs)
 	ipv6Address, _ := util.GetFirst6String(tailscaleOutput.TailscaleIPs)
 
-	return VPNInfo{IPv4Address: net.ParseIP(ipv4Address), IPv6Address: net.ParseIP(ipv6Address), NodeID: "", ProviderName: "tailscale", VPNInterface: tailscaleIf}, nil
+	return &Info{BackendState: tailscaleOutput.BackendState, IPv4Address: net.ParseIP(ipv4Address), IPv6Address: net.ParseIP(ipv6Address), NodeID: "", ProviderName: "tailscale", Interface: tailscaleIf}, nil
+}
+
+// get Tailscale advertised route list
+func GetAdvertisedRoutes() ([]netip.Prefix, error) {
+	output, err := util.ExecCommand("tailscale", []string{"debug", "prefs"})
+	if err != nil {
+		return nil, fmt.Errorf("failed to run tailscale debug prefs: %v", err)
+	}
+
+	logrus.Debugf("Output from tailscale debug prefs: %v", output)
+
+	var tailscaleOutput TailscalePrefsOutput
+	err = json.Unmarshal([]byte(output), &tailscaleOutput)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal tailscale output: %v", err)
+	}
+
+	return tailscaleOutput.AdvertiseRoutes, nil
 }
 
 // processCLIArgs separates the extraArgs part from the command.

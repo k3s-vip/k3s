@@ -2,6 +2,8 @@ package cloudprovider
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -23,12 +25,14 @@ import (
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
-	ccmapp "k8s.io/cloud-provider/app"
+	"k8s.io/cloud-provider/app"
 	servicehelper "k8s.io/cloud-provider/service/helpers"
 	utilsnet "k8s.io/utils/net"
 	utilsptr "k8s.io/utils/ptr"
+	"sigs.k8s.io/yaml"
 )
 
 var (
@@ -38,16 +42,19 @@ var (
 	daemonsetNodeLabel     = "svccontroller." + version.Program + ".cattle.io/enablelb"
 	daemonsetNodePoolLabel = "svccontroller." + version.Program + ".cattle.io/lbpool"
 	nodeSelectorLabel      = "svccontroller." + version.Program + ".cattle.io/nodeselector"
-	controllerName         = ccmapp.DefaultInitFuncConstructors["service"].InitContext.ClientName
+	priorityAnnotation     = "svccontroller." + version.Program + ".cattle.io/priorityclassname"
+	tolerationsAnnotation  = "svccontroller." + version.Program + ".cattle.io/tolerations"
+	controllerName         = app.DefaultInitFuncConstructors["service"].InitContext.ClientName
 )
 
 const (
-	Ready       = condition.Cond("Ready")
-	DefaultLBNS = meta.NamespaceSystem
+	Ready                      = condition.Cond("Ready")
+	DefaultLBNS                = meta.NamespaceSystem
+	DefaultLBPriorityClassName = "system-node-critical"
 )
 
 var (
-	DefaultLBImage = "rancher/klipper-lb:v0.4.7"
+	DefaultLBImage = "rancher/klipper-lb:v0.4.14"
 )
 
 func (k *k3s) Register(ctx context.Context,
@@ -194,7 +201,7 @@ func (k *k3s) processNextWorkItem() bool {
 
 // processSingleItem processes a single item from the work queue,
 // requeueing it if the handler fails.
-func (k *k3s) processSingleItem(obj interface{}) error {
+func (k *k3s) processSingleItem(obj any) error {
 	var (
 		key string
 		ok  bool
@@ -215,7 +222,6 @@ func (k *k3s) processSingleItem(obj interface{}) error {
 
 	k.workqueue.Forget(obj)
 	return nil
-
 }
 
 // updateServiceStatus updates the load balancer status for the matching service, if it exists and is a
@@ -318,10 +324,8 @@ func (k *k3s) patchStatus(svc *core.Service, previousStatus, newStatus *core.Loa
 // If at least one node has External IPs available, only external IPs are returned.
 // If no nodes have External IPs set, the Internal IPs of all nodes running pods are returned.
 func (k *k3s) podIPs(pods []*core.Pod, svc *core.Service, readyNodes map[string]bool) ([]string, error) {
-	// Go doesn't have sets so we stuff things into a map of bools and then get lists of keys
-	// to determine the unique set of IPs in use by pods.
-	extIPs := map[string]bool{}
-	intIPs := map[string]bool{}
+	extIPs := sets.Set[string]{}
+	intIPs := sets.Set[string]{}
 
 	for _, pod := range pods {
 		if pod.Spec.NodeName == "" || pod.Status.PodIP == "" {
@@ -343,25 +347,18 @@ func (k *k3s) podIPs(pods []*core.Pod, svc *core.Service, readyNodes map[string]
 
 		for _, addr := range node.Status.Addresses {
 			if addr.Type == core.NodeExternalIP {
-				extIPs[addr.Address] = true
+				extIPs.Insert(addr.Address)
 			} else if addr.Type == core.NodeInternalIP {
-				intIPs[addr.Address] = true
+				intIPs.Insert(addr.Address)
 			}
 		}
 	}
 
-	keys := func(addrs map[string]bool) (ips []string) {
-		for k := range addrs {
-			ips = append(ips, k)
-		}
-		return ips
-	}
-
 	var ips []string
-	if len(extIPs) > 0 {
-		ips = keys(extIPs)
+	if extIPs.Len() > 0 {
+		ips = extIPs.UnsortedList()
 	} else {
-		ips = keys(intIPs)
+		ips = intIPs.UnsortedList()
 	}
 
 	ips, err := filterByIPFamily(ips, svc)
@@ -434,23 +431,24 @@ func (k *k3s) deleteDaemonSet(ctx context.Context, svc *core.Service) error {
 func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 	name := generateName(svc)
 	oneInt := intstr.FromInt(1)
+	priorityClassName := k.getPriorityClassName(svc)
 	localTraffic := servicehelper.RequestsOnlyLocalTraffic(svc)
 	sourceRangesSet, err := servicehelper.GetLoadBalancerSourceRanges(svc)
 	if err != nil {
 		return nil, err
 	}
 	sourceRanges := strings.Join(sourceRangesSet.StringSlice(), ",")
+	securityContext := &core.PodSecurityContext{}
 
-	var sysctls []core.Sysctl
 	for _, ipFamily := range svc.Spec.IPFamilies {
 		switch ipFamily {
 		case core.IPv4Protocol:
-			sysctls = append(sysctls, core.Sysctl{Name: "net.ipv4.ip_forward", Value: "1"})
+			securityContext.Sysctls = append(securityContext.Sysctls, core.Sysctl{Name: "net.ipv4.ip_forward", Value: "1"})
 		case core.IPv6Protocol:
-			sysctls = append(sysctls, core.Sysctl{Name: "net.ipv6.conf.all.forwarding", Value: "1"})
-			// The upstream default load-balancer source range only includes IPv4, even if the service is IPv6-only or dual-stack.
-			// If using the default range, and IPv6 is enabled, also allow IPv6.
+			securityContext.Sysctls = append(securityContext.Sysctls, core.Sysctl{Name: "net.ipv6.conf.all.forwarding", Value: "1"})
 			if sourceRanges == "0.0.0.0/0" {
+				// The upstream default load-balancer source range only includes IPv4, even if the service is IPv6-only or dual-stack.
+				// If using the default range, and IPv6 is enabled, also allow IPv6.
 				sourceRanges += ",::/0"
 			}
 		}
@@ -485,17 +483,11 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 					},
 				},
 				Spec: core.PodSpec{
+					PriorityClassName:            priorityClassName,
 					ServiceAccountName:           "svclb",
 					AutomountServiceAccountToken: utilsptr.To(false),
-					SecurityContext: &core.PodSecurityContext{
-						Sysctls: sysctls,
-					},
+					SecurityContext:              securityContext,
 					Tolerations: []core.Toleration{
-						{
-							Key:      util.MasterRoleLabelKey,
-							Operator: "Exists",
-							Effect:   "NoSchedule",
-						},
 						{
 							Key:      util.ControlPlaneRoleLabelKey,
 							Operator: "Exists",
@@ -564,7 +556,7 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 					Name: "DEST_IPS",
 					ValueFrom: &core.EnvVarSource{
 						FieldRef: &core.ObjectFieldSelector{
-							FieldPath: getHostIPsFieldPath(),
+							FieldPath: "status.hostIP",
 						},
 					},
 				},
@@ -600,6 +592,14 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 		}
 		ds.Labels[nodeSelectorLabel] = "true"
 	}
+
+	// Fetch tolerations from the "svccontroller.k3s.cattle.io/tolerations" annotation on the service
+	// and append them to the DaemonSet's pod tolerations.
+	tolerations, err := k.getTolerations(svc)
+	if err != nil {
+		return nil, err
+	}
+	ds.Spec.Template.Spec.Tolerations = append(ds.Spec.Template.Spec.Tolerations, tolerations...)
 
 	return ds, nil
 }
@@ -692,9 +692,71 @@ func (k *k3s) removeFinalizer(ctx context.Context, svc *core.Service) (*core.Ser
 	return svc, nil
 }
 
+// getPriorityClassName returns the value of the priority class name annotation on the service,
+// or the system default priority class name.
+func (k *k3s) getPriorityClassName(svc *core.Service) string {
+	if svc != nil {
+		if v, ok := svc.Annotations[priorityAnnotation]; ok {
+			return v
+		}
+	}
+	return k.LBDefaultPriorityClassName
+}
+
+// getTolerations retrieves the tolerations from a service's annotations.
+// It parses the tolerations from a JSON or YAML string stored in the annotations.
+func (k *k3s) getTolerations(svc *core.Service) ([]core.Toleration, error) {
+	tolerationsStr, ok := svc.Annotations[tolerationsAnnotation]
+	if !ok {
+		return []core.Toleration{}, nil
+	}
+
+	var tolerations []core.Toleration
+	if err := json.Unmarshal([]byte(tolerationsStr), &tolerations); err != nil {
+		if err := yaml.Unmarshal([]byte(tolerationsStr), &tolerations); err != nil {
+			return nil, fmt.Errorf("failed to parse tolerations from annotation %s: %v", tolerationsAnnotation, err)
+		}
+	}
+
+	for i := range tolerations {
+		if err := validateToleration(&tolerations[i]); err != nil {
+			return nil, fmt.Errorf("validation failed for toleration %d: %v", i, err)
+		}
+	}
+
+	return tolerations, nil
+}
+
+// validateToleration ensures a toleration has valid fields according to its operator.
+func validateToleration(toleration *core.Toleration) error {
+	if toleration.Operator == "" {
+		toleration.Operator = core.TolerationOpEqual
+	}
+
+	if toleration.Key == "" && toleration.Operator != core.TolerationOpExists {
+		return errors.New("toleration with empty key must have operator 'Exists'")
+	}
+
+	if toleration.Operator == core.TolerationOpExists && toleration.Value != "" {
+		return errors.New("toleration with operator 'Exists' must have an empty value")
+	}
+
+	return nil
+}
+
 // generateName generates a distinct name for the DaemonSet based on the service name and UID
 func generateName(svc *core.Service) string {
-	return fmt.Sprintf("svclb-%s-%s", svc.Name, svc.UID[:8])
+	name := svc.Name
+	// ensure that the service name plus prefix and uuid aren't overly long, but
+	// don't cut the service name at a trailing hyphen.
+	if len(name) > 48 {
+		trimlen := 48
+		for name[trimlen-1] == '-' {
+			trimlen--
+		}
+		name = name[0:trimlen]
+	}
+	return fmt.Sprintf("svclb-%s-%s", name, svc.UID[:8])
 }
 
 // ingressToString converts a list of LoadBalancerIngress entries to strings
@@ -708,8 +770,4 @@ func ingressToString(ingresses []core.LoadBalancerIngress) []string {
 		}
 	}
 	return parts
-}
-
-func getHostIPsFieldPath() string {
-	return "status.hostIP"
 }

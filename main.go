@@ -1,8 +1,6 @@
 //go:generate go run pkg/codegen/cleanup/main.go
 //go:generate rm -rf pkg/generated
 //go:generate go run pkg/codegen/main.go
-//go:generate go fmt pkg/deploy/zz_generated_bindata.go
-//go:generate go fmt pkg/static/zz_generated_bindata.go
 
 package main
 
@@ -22,18 +20,20 @@ import (
 	"github.com/k3s-io/k3s/pkg/cli/server"
 	"github.com/k3s-io/k3s/pkg/configfilearg"
 	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
+
+	_ "github.com/k3s-io/k3s/pkg/executor/embed"
 )
 
 func main() {
 	app := cmds.NewApp()
-	app.Commands = []cli.Command{
+	app.DisableSliceFlagSeparator = true
+	app.Commands = []*cli.Command{
 		cmds.NewServerCommand(server.Run),
 		cmds.NewAgentCommand(agent.Run),
 		cmds.NewKubectlCommand(kubectl.Run),
 		cmds.NewCRICTL(crictl.Run),
 		cmds.NewEtcdSnapshotCommands(
-			etcdsnapshot.Run,
 			etcdsnapshot.Delete,
 			etcdsnapshot.List,
 			etcdsnapshot.Prune,
@@ -46,12 +46,17 @@ func main() {
 			secretsencrypt.Prepare,
 			secretsencrypt.Rotate,
 			secretsencrypt.Reencrypt,
+			secretsencrypt.RotateKeys,
 		),
 		cmds.NewCertCommands(
+			cert.Check,
 			cert.Rotate,
 			cert.RotateCA,
 		),
-		cmds.NewCompletionCommand(completion.Run),
+		cmds.NewCompletionCommand(
+			completion.Bash,
+			completion.Zsh,
+		),
 	}
 
 	if err := app.Run(configfilearg.MustParse(os.Args)); err != nil && !errors.Is(err, context.Canceled) {

@@ -1,5 +1,6 @@
-name: Build K3s
-
+name: Build
+env:
+  OEM: ${{ inputs.OEM }}
 on: 
   workflow_call:
    inputs:
@@ -11,6 +12,13 @@ on:
       type: boolean
       required: false
       default: false
+  workflow_dispatch:
+   inputs:
+    OEM:
+      default: vip
+      description: Meta
+      required: true
+      type: string
 
 permissions:
   contents: read
@@ -19,34 +27,34 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    if: always()
     timeout-minutes: 20
     steps:
-    - name: Checkout K3s
+    - name: Checkout
       uses: actions/checkout@v4
-    - name: Build K3s binary
+    - name: Build binary
       run: |
-        DOCKER_BUILDKIT=1 SKIP_AIRGAP=1 SKIP_VALIDATE=1 make
+        DOCKER_BUILDKIT=1 SKIP_AIRGAP=1 SKIP_IMAGE=1 SKIP_VALIDATE=1 make
         sha256sum dist/artifacts/k3s | sed 's|dist/artifacts/||' > dist/artifacts/k3s.sha256sum
-    - name: Build K3s image
-      if: inputs.upload-image == true
-      run: make package-image
-    - name: bundle repo
-      if: inputs.upload-repo == true
+    - name: "Upload binary"
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.OEM }}-amd64
+        path: dist/artifacts/k3s*
+  arm64:
+    name: Build-${{ inputs.OEM }}
+    runs-on: ubuntu-24.04-arm
+    if: always()
+    timeout-minutes: 20
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Build binary
       run: |
-        tar -czvf ../k3s-repo.tar.gz .
-        mv ../k3s-repo.tar.gz .
-    - name: "Upload K3s directory"
-      if: inputs.upload-repo == true
+        DOCKER_BUILDKIT=1 SKIP_AIRGAP=1 SKIP_IMAGE=1 SKIP_VALIDATE=1 make
+        sha256sum dist/artifacts/k3s-arm64 | sed 's|dist/artifacts/||' > dist/artifacts/k3s.sha256sum
+    - name: "Upload binary"
       uses: actions/upload-artifact@v4
       with:
-        name: k3s-repo.tar.gz
-        path: k3s-repo.tar.gz
-    - name: "Save K3s image"
-      if: inputs.upload-image == true
-      run: docker image save rancher/k3s -o ./dist/artifacts/k3s-image.tar
-    - name: "Upload K3s binary"
-      if: inputs.upload-repo == false
-      uses: actions/upload-artifact@v4
-      with:
-        name: k3s
+        name: ${{ inputs.OEM }}-arm64
         path: dist/artifacts/k3s*

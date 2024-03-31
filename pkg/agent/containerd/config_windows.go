@@ -1,17 +1,28 @@
 //go:build windows
-// +build windows
 
 package containerd
 
 import (
+	"net"
+
 	"github.com/containerd/containerd"
 	"github.com/k3s-io/k3s/pkg/agent/templates"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	util3 "github.com/k3s-io/k3s/pkg/util"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"k8s.io/kubernetes/pkg/kubelet/util"
 )
+
+// hostDirectory returns the name of the host dir for a given registry.
+// Colons are not allowed in windows paths, so convert `:port` to `_port_`.
+// Ref: https://github.com/containerd/containerd/blob/v1.7.25/remotes/docker/config/hosts.go#L291-L298
+func hostDirectory(host string) string {
+	if host, port, err := net.SplitHostPort(host); err == nil && port != "" {
+		return host + "_" + port + "_"
+	}
+	return host
+}
 
 func getContainerdArgs(cfg *config.Node) []string {
 	args := []string{
@@ -31,8 +42,6 @@ func SetupContainerdConfig(cfg *config.Node) error {
 	containerdConfig := templates.ContainerdConfig{
 		NodeConfig:            cfg,
 		DisableCgroup:         true,
-		SystemdCgroup:         false,
-		IsRunningInUserNS:     false,
 		PrivateRegistryConfig: cfg.AgentConfig.Registry,
 		NoDefaultEndpoint:     cfg.Containerd.NoDefault,
 	}
@@ -54,13 +63,13 @@ func Client(address string) (*containerd.Client, error) {
 }
 
 func OverlaySupported(root string) error {
-	return errors.Wrapf(util3.ErrUnsupportedPlatform, "overlayfs is not supported")
+	return pkgerrors.WithMessagef(util3.ErrUnsupportedPlatform, "overlayfs is not supported")
 }
 
 func FuseoverlayfsSupported(root string) error {
-	return errors.Wrapf(util3.ErrUnsupportedPlatform, "fuse-overlayfs is not supported")
+	return pkgerrors.WithMessagef(util3.ErrUnsupportedPlatform, "fuse-overlayfs is not supported")
 }
 
 func StargzSupported(root string) error {
-	return errors.Wrapf(util3.ErrUnsupportedPlatform, "stargz is not supported")
+	return pkgerrors.WithMessagef(util3.ErrUnsupportedPlatform, "stargz is not supported")
 }

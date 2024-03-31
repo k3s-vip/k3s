@@ -4,17 +4,16 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"net/http/pprof"
 	"os"
 	"path/filepath"
+	"strconv"
 
-	"github.com/gorilla/mux"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/rancher/dynamiclistener"
 	"github.com/rancher/dynamiclistener/factory"
@@ -24,7 +23,6 @@ import (
 	"github.com/rancher/wrangler/pkg/generated/controllers/core"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	utilsnet "k8s.io/utils/net"
 )
 
 // newListener returns a new TCP listener and HTTP request handler using dynamiclistener.
@@ -43,11 +41,7 @@ func (c *Cluster) newListener(ctx context.Context) (net.Listener, http.Handler, 
 			os.Remove(filepath.Join(c.config.DataDir, "tls/dynamic-cert.json"))
 		}
 	}
-	ip := c.config.BindAddress
-	if utilsnet.IsIPv6String(ip) {
-		ip = fmt.Sprintf("[%s]", ip)
-	}
-	tcp, err := dynamiclistener.NewTCPListener(ip, c.config.SupervisorPort)
+	tcp, err := util.ListenWithLoopback(ctx, c.config.BindAddress, strconv.Itoa(c.config.SupervisorPort))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -96,38 +90,37 @@ func (c *Cluster) filterCN(cn ...string) []string {
 // initClusterAndHTTPS sets up the dynamic tls listener, request router,
 // and cluster database. Once the database is up, it starts the supervisor http server.
 func (c *Cluster) initClusterAndHTTPS(ctx context.Context) error {
-	// Set up dynamiclistener TLS listener and request handler
-	listener, handler, err := c.newListener(ctx)
+	// Set up dynamiclistener TLS listener and request handler.
+	// The dynamiclistener request handler is always called first as a middleware to add TLS SANs for host headers.
+	// It does not actually do any request handling or send a response.
+	listener, certHandler, err := c.newListener(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Get the base request handler
-	handler, err = c.getHandler(handler)
-	if err != nil {
-		return err
-	}
+	// Create a stub request handler that returns a Service Unavailable response
+	// if the core request handlers have not yet been started yet.
+	var handler http.Handler = http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if c.config.Runtime.Handler != nil {
+			c.config.Runtime.Handler.ServeHTTP(rw, req)
+		} else {
+			util.SendError(errors.New("starting"), rw, req, http.StatusServiceUnavailable)
+		}
+	})
 
-	// Register database request handlers and controller callbacks
+	// Register database request handlers and controller callbacks.
+	// The database handler wraps the stub handler, and calls it for any requests not related to database bootstrapping.
 	handler, err = c.registerDBHandlers(handler)
 	if err != nil {
 		return err
 	}
 
-	if c.config.EnablePProf {
-		mux := mux.NewRouter().SkipClean(true)
-		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-		mux.PathPrefix("/debug/pprof/").HandlerFunc(pprof.Index)
-		mux.NotFoundHandler = handler
-		handler = mux
-	}
-
 	// Create a HTTP server with the registered request handlers, using logrus for logging
 	server := http.Server{
-		Handler: handler,
+		Handler: http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+			certHandler.ServeHTTP(rw, req)
+			handler.ServeHTTP(rw, req)
+		}),
 	}
 
 	if logrus.IsLevelEnabled(logrus.DebugLevel) {
@@ -158,9 +151,13 @@ func (c *Cluster) initClusterAndHTTPS(ctx context.Context) error {
 func tlsStorage(ctx context.Context, dataDir string, runtime *config.ControlRuntime) dynamiclistener.TLSStorage {
 	fileStorage := file.New(filepath.Join(dataDir, "tls/dynamic-cert.json"))
 	cache := memory.NewBacked(fileStorage)
-	return kubernetes.New(ctx, func() *core.Factory {
-		return runtime.Core
-	}, metav1.NamespaceSystem, version.Program+"-serving", cache)
+	coreGetter := func() *core.Factory {
+		if coreFactory, ok := runtime.Core.(*core.Factory); ok {
+			return coreFactory
+		}
+		return nil
+	}
+	return kubernetes.New(ctx, coreGetter, metav1.NamespaceSystem, version.Program+"-serving", cache)
 }
 
 // wrapHandler wraps the dynamiclistener request handler, adding a User-Agent value to
