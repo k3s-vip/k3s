@@ -54,24 +54,16 @@ mkdir -p ./etc
     set -x
 )
 
-tar cvf ./build/out/data.tar ./bin ./etc
-zstd --no-progress -T0 -16 -f --long=25 --rm ./build/out/data.tar -o ./build/out/data.tar.zst
-HASH=$(sha256sum ./build/out/data.tar.zst | awk '{print $1}')
+# Ensure the embedded tarball is reproducible: sort file order and clamp timestamps
+DATA_TAR_ZST=./build/out/data-${OS}-${ARCH}.tar.zst
+tar --sort=name --mtime=@0 -cvf ./build/out/data-${OS}.tar ./bin ./etc
+zstd --no-progress -T0 -16 -f --long=25 --rm ./build/out/data-${OS}.tar -o ${DATA_TAR_ZST}
+HASH=$(sha256sum ${DATA_TAR_ZST} | awk '{print $1}')
 
-cp ./build/out/data.tar.zst ./build/data/${HASH}.tar.zst
-
-BIN_SUFFIX="-${ARCH}"
-if [ ${ARCH} = amd64 ]; then
-    BIN_SUFFIX=""
-elif [ ${ARCH} = arm ]; then
-    BIN_SUFFIX="-armhf"
-elif [ ${ARCH} = s390x ]; then
-    BIN_SUFFIX="-s390x"
-fi
+cp ${DATA_TAR_ZST} ./build/data/${HASH}.tar.zst
 
 CMD_NAME=dist/artifacts/k3s${BIN_SUFFIX}${BINARY_POSTFIX}
 
-GOOS=linux CC=gcc CXX=g++ "${GO}" generate
 LDFLAGS="
     -X github.com/k3s-io/k3s/pkg/version.Version=$VERSION
     -X github.com/k3s-io/k3s/pkg/version.GitCommit=${COMMIT:0:8}
@@ -79,8 +71,9 @@ LDFLAGS="
 "
 TAGS="urfave_cli_no_docs"
 STATIC="-extldflags '-static'"
+embedFS=pkg/data/embed;rm -rf $embedFS;cp -av build/data $embedFS
 CGO_ENABLED=0 "${GO}" build -tags "$TAGS" -buildvcs=false -ldflags "$LDFLAGS $STATIC" -o ${CMD_NAME} ./cmd/k3s
 
 stat ${CMD_NAME}
 
-./scripts/build-upload ${CMD_NAME} ${COMMIT}
+#./scripts/build-upload ${CMD_NAME} ${COMMIT}

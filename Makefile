@@ -1,23 +1,24 @@
 TARGETS := $(shell ls scripts | grep -v \\.sh)
-GO_FILES ?= $$(find . -name '*.go' | grep -v generated)
+GO_FILES ?= $$(find . -name '*.go')
+SHELL := /bin/bash
 
 
 .dapper:
 	@echo Downloading dapper
-	@curl -sL https://releases.rancher.com/dapper/v0.6.0/dapper-$$(uname -s)-$$(uname -m) > .dapper.tmp
-	@@chmod +x .dapper.tmp
-	@./.dapper.tmp -v
-	@mv .dapper.tmp .dapper
+	@curl -fsSL https://github.com/rancher-archives/dapper/releases/download/v0.6.0/dapper-$$(uname -s)-$$(uname -m) >.dapper
+	@@chmod a+x .dapper
+	@./.dapper -v
 
-$(TARGETS): .dapper
+.PHONY: docker.sock
+docker.sock:
+	while ! docker version 1>/dev/null; do sleep 1; done
+
+$(TARGETS): .dapper docker.sock
 	./.dapper $@
 
 .PHONY: deps
 deps:
 	go mod tidy
-
-release:
-	./scripts/release.sh
 
 .DEFAULT_GOAL := ci
 
@@ -37,3 +38,36 @@ image-scan:
 format:
 	gofmt -s -l -w $(GO_FILES)
 	goimports -w $(GO_FILES)
+
+.PHONY: local-binary
+local-binary:
+	@echo "INFO: Building K3s binaries and assets..."
+	. ./scripts/git_version.sh && \
+	docker buildx build \
+		--build-arg "GIT_TAG=$$GIT_TAG" \
+		--build-arg "TREE_STATE=$$TREE_STATE" \
+		--build-arg "COMMIT=$$COMMIT" \
+		--build-arg "DIRTY=$$DIRTY" \
+		--build-arg="GOCOVER=$(GOCOVER)" \
+		--build-arg="GOOS=$(GOOS)" \
+		--build-arg="DEBUG=$(DEBUG)" \
+		-f Dockerfile.local --target=result --output=. .
+
+.PHONY: multiarch-binary
+multiarch-binary:
+	@echo "INFO: Building K3s binaries and assets for all release platforms..."
+	. ./scripts/git_version.sh && \
+	docker buildx build \
+		--platform linux/amd64,linux/arm64,linux/arm/v7,linux/riscv64,windows/amd64 \
+		--build-arg "GIT_TAG=$$GIT_TAG" \
+		--build-arg "TREE_STATE=$$TREE_STATE" \
+		--build-arg "COMMIT=$$COMMIT" \
+		--build-arg "DIRTY=$$DIRTY" \
+		--build-arg="GOCOVER=$(GOCOVER)" \
+		--build-arg="DEBUG=$(DEBUG)" \
+		-f Dockerfile.local --target=multiarch-result --output type=local,dest=.,platform-split=false .
+
+.PHONY: image
+image: binary
+	@echo "INFO: Building K3s image..."
+	./scripts/package-image

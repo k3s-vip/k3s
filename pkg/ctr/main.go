@@ -34,10 +34,10 @@ func main() {
 	app := app.New()
 	for i, flag := range app.Flags {
 		if sFlag, ok := flag.(cli.StringFlag); ok {
-			if sFlag.Name == "address, a" {
+			if sFlag.Name == "address" {
 				sFlag.Value = "/run/k3s/containerd/containerd.sock"
 				app.Flags[i] = sFlag
-			} else if sFlag.Name == "namespace, n" {
+			} else if sFlag.Name == "namespace" {
 				sFlag.Value = "k8s.io"
 				app.Flags[i] = sFlag
 			}

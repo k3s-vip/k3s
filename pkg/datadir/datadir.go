@@ -1,12 +1,12 @@
 package datadir
 
 import (
-	"os"
 	"path/filepath"
 
+	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/home"
+	"github.com/k3s-io/k3s/pkg/util/permissions"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/pkg/errors"
-	"github.com/rancher/wrangler/pkg/resolvehome"
 )
 
 var (
@@ -22,16 +22,16 @@ func Resolve(dataDir string) (string, error) {
 
 func LocalHome(dataDir string, forceLocal bool) (string, error) {
 	if dataDir == "" {
-		if os.Getuid() == 0 && !forceLocal {
+		if permissions.IsPrivileged() == nil && !forceLocal {
 			dataDir = DefaultDataDir
 		} else {
 			dataDir = DefaultHomeDataDir
 		}
 	}
 
-	dataDir, err := resolvehome.Resolve(dataDir)
+	dataDir, err := home.Resolve(dataDir)
 	if err != nil {
-		return "", errors.Wrapf(err, "resolving %s", dataDir)
+		return "", errors.WithMessagef(err, "resolving %s", dataDir)
 	}
 
 	return filepath.Abs(dataDir)

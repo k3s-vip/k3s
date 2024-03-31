@@ -3,7 +3,7 @@ package loadbalancer
 import (
 	"errors"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -28,6 +28,9 @@ func parseURL(serverURL, newHost string) (string, string, error) {
 	return address, parsedURL.String(), nil
 }
 
+// sortServers returns a sorted, unique list of strings, with any
+// empty values removed. The returned bool is true if the list
+// contains the search string.
 func sortServers(input []string, search string) ([]string, bool) {
 	result := []string{}
 	found := false
@@ -44,6 +47,6 @@ func sortServers(input []string, search string) ([]string, bool) {
 		result = append(result, entry)
 	}
 
-	sort.Strings(result)
+	slices.Sort(result)
 	return result, found
 }

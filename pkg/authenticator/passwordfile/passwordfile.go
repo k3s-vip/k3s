@@ -25,7 +25,7 @@ import (
 	"strings"
 
 	"github.com/k3s-io/k3s/pkg/nodepassword"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	"k8s.io/apiserver/pkg/authentication/user"
