@@ -1,4 +1,4 @@
-package server
+package handlers
 
 import (
 	"context"
@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 
+	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/cluster"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/passwd"
@@ -30,37 +32,45 @@ func getServerTokenRequest(req *http.Request) (TokenRotateRequest, error) {
 	return result, err
 }
 
-func tokenRequestHandler(ctx context.Context, server *config.Control) http.Handler {
+func TokenRequest(ctx context.Context, control *config.Control) http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-		if req.TLS == nil || req.Method != http.MethodPut {
-			resp.WriteHeader(http.StatusBadRequest)
+		if req.Method != http.MethodPut {
+			util.SendError(fmt.Errorf("method not allowed"), resp, req, http.StatusMethodNotAllowed)
 			return
 		}
 		var err error
 		sTokenReq, err := getServerTokenRequest(req)
 		logrus.Debug("Received token request")
 		if err != nil {
-			resp.WriteHeader(http.StatusBadRequest)
-			resp.Write([]byte(err.Error()))
+			util.SendError(err, resp, req, http.StatusBadRequest)
 			return
 		}
-		if err = tokenRotate(ctx, server, *sTokenReq.NewToken); err != nil {
-			genErrorMessage(resp, http.StatusInternalServerError, err, "token")
+		if err = tokenRotate(ctx, control, *sTokenReq.NewToken); err != nil {
+			util.SendErrorWithID(err, "token", resp, req, http.StatusInternalServerError)
 			return
 		}
 		resp.WriteHeader(http.StatusOK)
 	})
 }
 
-func tokenRotate(ctx context.Context, server *config.Control, newToken string) error {
-	passwd, err := passwd.Read(server.Runtime.PasswdFile)
+func WriteToken(token, file, certs string) error {
+	if len(token) == 0 {
+		return nil
+	}
+
+	token, err := clientaccess.FormatToken(token, certs)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(file, []byte(token+"\n"), 0600)
+}
+
+func tokenRotate(ctx context.Context, control *config.Control, newToken string) error {
+	passwd, err := passwd.Read(control.Runtime.PasswdFile)
 	if err != nil {
 		return err
 	}
 
-	if err != nil {
-		return err
-	}
 	oldToken, found := passwd.Pass("server")
 	if !found {
 		return fmt.Errorf("server token not found")
@@ -72,29 +82,33 @@ func tokenRotate(ctx context.Context, server *config.Control, newToken string) e
 		}
 	}
 
+	if newToken, err = util.NormalizeToken(newToken); err != nil {
+		return err
+	}
+
 	if err := passwd.EnsureUser("server", version.Program+":server", newToken); err != nil {
 		return err
 	}
 
 	// If the agent token is the same a server, we need to change both
-	if agentToken, found := passwd.Pass("node"); found && agentToken == oldToken && server.AgentToken == "" {
+	if agentToken, found := passwd.Pass("node"); found && agentToken == oldToken && control.AgentToken == "" {
 		if err := passwd.EnsureUser("node", version.Program+":agent", newToken); err != nil {
 			return err
 		}
 	}
 
-	if err := passwd.Write(server.Runtime.PasswdFile); err != nil {
+	if err := passwd.Write(control.Runtime.PasswdFile); err != nil {
 		return err
 	}
 
-	serverTokenFile := filepath.Join(server.DataDir, "token")
-	if err := writeToken("server:"+newToken, serverTokenFile, server.Runtime.ServerCA); err != nil {
+	serverTokenFile := filepath.Join(control.DataDir, "token")
+	if err := WriteToken("server:"+newToken, serverTokenFile, control.Runtime.ServerCA); err != nil {
 		return err
 	}
 
-	if err := cluster.RotateBootstrapToken(ctx, server, oldToken); err != nil {
+	if err := cluster.RotateBootstrapToken(ctx, control, oldToken); err != nil {
 		return err
 	}
-	server.Token = newToken
-	return cluster.Save(ctx, server, true)
+	control.Token = newToken
+	return cluster.Save(ctx, control, true)
 }
