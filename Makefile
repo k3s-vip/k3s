@@ -4,10 +4,9 @@ GO_FILES ?= $$(find . -name '*.go' | grep -v generated)
 
 .dapper:
 	@echo Downloading dapper
-	@curl -sL https://releases.rancher.com/dapper/v0.6.0/dapper-$$(uname -s)-$$(uname -m) > .dapper.tmp
-	@@chmod +x .dapper.tmp
-	@./.dapper.tmp -v
-	@mv .dapper.tmp .dapper
+	@curl -fsSL https://github.com/rancher-archives/dapper/releases/download/v0.6.0/dapper-$$(uname -s)-$$(uname -m) >.dapper
+	@@chmod a+x .dapper
+	@./.dapper -v
 
 $(TARGETS): .dapper
 	./.dapper $@

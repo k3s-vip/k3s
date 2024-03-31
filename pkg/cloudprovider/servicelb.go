@@ -2,8 +2,10 @@ package cloudprovider
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -13,7 +15,6 @@ import (
 	"github.com/rancher/wrangler/pkg/condition"
 	coreclient "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
 	discoveryclient "github.com/rancher/wrangler/pkg/generated/controllers/discovery/v1"
-	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/rancher/wrangler/pkg/objectset"
 	"github.com/sirupsen/logrus"
 	apps "k8s.io/api/apps/v1"
@@ -23,31 +24,37 @@ import (
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
-	ccmapp "k8s.io/cloud-provider/app"
+	"k8s.io/cloud-provider/app"
 	servicehelper "k8s.io/cloud-provider/service/helpers"
 	utilsnet "k8s.io/utils/net"
 	utilsptr "k8s.io/utils/ptr"
+	"sigs.k8s.io/yaml"
 )
 
 var (
-	finalizerName          = "svccontroller." + version.Program + ".cattle.io/daemonset"
-	svcNameLabel           = "svccontroller." + version.Program + ".cattle.io/svcname"
-	svcNamespaceLabel      = "svccontroller." + version.Program + ".cattle.io/svcnamespace"
-	daemonsetNodeLabel     = "svccontroller." + version.Program + ".cattle.io/enablelb"
-	daemonsetNodePoolLabel = "svccontroller." + version.Program + ".cattle.io/lbpool"
-	nodeSelectorLabel      = "svccontroller." + version.Program + ".cattle.io/nodeselector"
-	controllerName         = ccmapp.DefaultInitFuncConstructors["service"].InitContext.ClientName
+	finalizerName           = "svccontroller." + version.Program + ".cattle.io/daemonset"
+	svcNameLabel            = "svccontroller." + version.Program + ".cattle.io/svcname"
+	svcNamespaceLabel       = "svccontroller." + version.Program + ".cattle.io/svcnamespace"
+	daemonsetNodeLabel      = "svccontroller." + version.Program + ".cattle.io/enablelb"
+	daemonsetNodePoolLabel  = "svccontroller." + version.Program + ".cattle.io/lbpool"
+	daemonsetNodePoolPrefix = "lbpool.svccontroller." + version.Program + ".cattle.io/"
+	nodeSelectorLabel       = "svccontroller." + version.Program + ".cattle.io/nodeselector"
+	priorityAnnotation      = "svccontroller." + version.Program + ".cattle.io/priorityclassname"
+	tolerationsAnnotation   = "svccontroller." + version.Program + ".cattle.io/tolerations"
+	controllerName          = app.DefaultInitFuncConstructors["service"].InitContext.ClientName
 )
 
 const (
-	Ready       = condition.Cond("Ready")
-	DefaultLBNS = meta.NamespaceSystem
+	Ready                      = condition.Cond("Ready")
+	DefaultLBNS                = meta.NamespaceSystem
+	DefaultLBPriorityClassName = "system-node-critical"
 )
 
 var (
-	DefaultLBImage = "rancher/klipper-lb:v0.4.7"
+	DefaultLBImage = "rancher/klipper-lb:v0.4.17"
 )
 
 func (k *k3s) Register(ctx context.Context,
@@ -134,11 +141,22 @@ func (k *k3s) onChangePod(key string, pod *core.Pod) (*core.Pod, error) {
 }
 
 // onChangeNode handles changes to Nodes. We need to handle this as we may need to kick the DaemonSet
-// to add or remove pods from nodes if labels have changed.
+// to add or remove pods from nodes if labels have changed, and to update the status of Services
+// with pods on this node if the node addresses have changed.
 func (k *k3s) onChangeNode(key string, node *core.Node) (*core.Node, error) {
 	if node == nil {
+		k.nodeAddressMu.Lock()
+		delete(k.nodeAddresses, key)
+		k.nodeAddressMu.Unlock()
 		return nil, nil
 	}
+
+	if k.nodeAddressesChanged(node) {
+		if err := k.enqueueNodeServices(node.Name); err != nil {
+			return node, err
+		}
+	}
+
 	if _, ok := node.Labels[daemonsetNodeLabel]; !ok {
 		return node, nil
 	}
@@ -148,6 +166,58 @@ func (k *k3s) onChangeNode(key string, node *core.Node) (*core.Node, error) {
 	}
 
 	return node, nil
+}
+
+// nodeAddressesChanged records the current addresses of a node, returning true if they differ
+// from the addresses last seen for that node. Nodes are updated frequently by the kubelet, so
+// only reacting to address changes avoids re-checking Service status on every node update.
+func (k *k3s) nodeAddressesChanged(node *core.Node) bool {
+	addresses := lbNodeAddresses(node)
+
+	k.nodeAddressMu.Lock()
+	defer k.nodeAddressMu.Unlock()
+
+	previous, ok := k.nodeAddresses[node.Name]
+	k.nodeAddresses[node.Name] = addresses
+	return !ok || previous != addresses
+}
+
+// enqueueNodeServices enqueues a status update for all Services with ServiceLB pods on the named
+// node. The addresses of the node hosting a pod are used as the LoadBalancer ingress IPs, so the
+// status of these Services must be re-checked when the node addresses change.
+func (k *k3s) enqueueNodeServices(nodeName string) error {
+	pods, err := k.podCache.List(k.LBNamespace, labels.Everything())
+	if err != nil {
+		return err
+	}
+
+	for _, pod := range pods {
+		if pod.Spec.NodeName != nodeName {
+			continue
+		}
+		serviceName := pod.Labels[svcNameLabel]
+		serviceNamespace := pod.Labels[svcNamespaceLabel]
+		if serviceName == "" || serviceNamespace == "" {
+			continue
+		}
+		k.workqueue.Add(serviceNamespace + "/" + serviceName)
+	}
+
+	return nil
+}
+
+// lbNodeAddresses returns a stable representation of the node addresses used to populate
+// LoadBalancer status, so that changes to them can be detected. Addresses that are not used
+// by the load balancer, such as the node hostname, are ignored.
+func lbNodeAddresses(node *core.Node) string {
+	addresses := make([]string, 0, len(node.Status.Addresses))
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == core.NodeExternalIP || addr.Type == core.NodeInternalIP {
+			addresses = append(addresses, string(addr.Type)+"="+addr.Address)
+		}
+	}
+	slices.Sort(addresses)
+	return strings.Join(addresses, ",")
 }
 
 // onChangeEndpointSlice handles changes to EndpointSlices. This is used to ensure that LoadBalancer
@@ -194,7 +264,7 @@ func (k *k3s) processNextWorkItem() bool {
 
 // processSingleItem processes a single item from the work queue,
 // requeueing it if the handler fails.
-func (k *k3s) processSingleItem(obj interface{}) error {
+func (k *k3s) processSingleItem(obj any) error {
 	var (
 		key string
 		ok  bool
@@ -215,7 +285,6 @@ func (k *k3s) processSingleItem(obj interface{}) error {
 
 	k.workqueue.Forget(obj)
 	return nil
-
 }
 
 // updateServiceStatus updates the load balancer status for the matching service, if it exists and is a
@@ -318,10 +387,8 @@ func (k *k3s) patchStatus(svc *core.Service, previousStatus, newStatus *core.Loa
 // If at least one node has External IPs available, only external IPs are returned.
 // If no nodes have External IPs set, the Internal IPs of all nodes running pods are returned.
 func (k *k3s) podIPs(pods []*core.Pod, svc *core.Service, readyNodes map[string]bool) ([]string, error) {
-	// Go doesn't have sets so we stuff things into a map of bools and then get lists of keys
-	// to determine the unique set of IPs in use by pods.
-	extIPs := map[string]bool{}
-	intIPs := map[string]bool{}
+	extIPs := sets.Set[string]{}
+	intIPs := sets.Set[string]{}
 
 	for _, pod := range pods {
 		if pod.Spec.NodeName == "" || pod.Status.PodIP == "" {
@@ -343,25 +410,18 @@ func (k *k3s) podIPs(pods []*core.Pod, svc *core.Service, readyNodes map[string]
 
 		for _, addr := range node.Status.Addresses {
 			if addr.Type == core.NodeExternalIP {
-				extIPs[addr.Address] = true
+				extIPs.Insert(addr.Address)
 			} else if addr.Type == core.NodeInternalIP {
-				intIPs[addr.Address] = true
+				intIPs.Insert(addr.Address)
 			}
 		}
 	}
 
-	keys := func(addrs map[string]bool) (ips []string) {
-		for k := range addrs {
-			ips = append(ips, k)
-		}
-		return ips
-	}
-
 	var ips []string
-	if len(extIPs) > 0 {
-		ips = keys(extIPs)
+	if extIPs.Len() > 0 {
+		ips = extIPs.UnsortedList()
 	} else {
-		ips = keys(intIPs)
+		ips = intIPs.UnsortedList()
 	}
 
 	ips, err := filterByIPFamily(ips, svc)
@@ -391,8 +451,8 @@ func filterByIPFamily(ips []string, svc *core.Service) ([]string, error) {
 		}
 	}
 
-	sort.Strings(ipv4Addresses)
-	sort.Strings(ipv6Addresses)
+	slices.Sort(ipv4Addresses)
+	slices.Sort(ipv6Addresses)
 
 	for _, ipFamily := range svc.Spec.IPFamilies {
 		switch ipFamily {
@@ -434,23 +494,24 @@ func (k *k3s) deleteDaemonSet(ctx context.Context, svc *core.Service) error {
 func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 	name := generateName(svc)
 	oneInt := intstr.FromInt(1)
+	priorityClassName := k.getPriorityClassName(svc)
 	localTraffic := servicehelper.RequestsOnlyLocalTraffic(svc)
 	sourceRangesSet, err := servicehelper.GetLoadBalancerSourceRanges(svc)
 	if err != nil {
 		return nil, err
 	}
 	sourceRanges := strings.Join(sourceRangesSet.StringSlice(), ",")
+	securityContext := &core.PodSecurityContext{}
 
-	var sysctls []core.Sysctl
 	for _, ipFamily := range svc.Spec.IPFamilies {
 		switch ipFamily {
 		case core.IPv4Protocol:
-			sysctls = append(sysctls, core.Sysctl{Name: "net.ipv4.ip_forward", Value: "1"})
+			securityContext.Sysctls = append(securityContext.Sysctls, core.Sysctl{Name: "net.ipv4.ip_forward", Value: "1"})
 		case core.IPv6Protocol:
-			sysctls = append(sysctls, core.Sysctl{Name: "net.ipv6.conf.all.forwarding", Value: "1"})
-			// The upstream default load-balancer source range only includes IPv4, even if the service is IPv6-only or dual-stack.
-			// If using the default range, and IPv6 is enabled, also allow IPv6.
+			securityContext.Sysctls = append(securityContext.Sysctls, core.Sysctl{Name: "net.ipv6.conf.all.forwarding", Value: "1"})
 			if sourceRanges == "0.0.0.0/0" {
+				// The upstream default load-balancer source range only includes IPv4, even if the service is IPv6-only or dual-stack.
+				// If using the default range, and IPv6 is enabled, also allow IPv6.
 				sourceRanges += ",::/0"
 			}
 		}
@@ -485,17 +546,11 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 					},
 				},
 				Spec: core.PodSpec{
+					PriorityClassName:            priorityClassName,
 					ServiceAccountName:           "svclb",
 					AutomountServiceAccountToken: utilsptr.To(false),
-					SecurityContext: &core.PodSecurityContext{
-						Sysctls: sysctls,
-					},
+					SecurityContext:              securityContext,
 					Tolerations: []core.Toleration{
-						{
-							Key:      util.MasterRoleLabelKey,
-							Operator: "Exists",
-							Effect:   "NoSchedule",
-						},
 						{
 							Key:      util.ControlPlaneRoleLabelKey,
 							Operator: "Exists",
@@ -564,7 +619,7 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 					Name: "DEST_IPS",
 					ValueFrom: &core.EnvVarSource{
 						FieldRef: &core.ObjectFieldSelector{
-							FieldPath: getHostIPsFieldPath(),
+							FieldPath: "status.hostIP",
 						},
 					},
 				},
@@ -594,14 +649,54 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 		ds.Spec.Template.Spec.NodeSelector = map[string]string{
 			daemonsetNodeLabel: "true",
 		}
-		// Add node selector for "svccontroller.k3s.cattle.io/lbpool=<pool>" if service has lbpool label
-		if svc.Labels[daemonsetNodePoolLabel] != "" {
-			ds.Spec.Template.Spec.NodeSelector[daemonsetNodePoolLabel] = svc.Labels[daemonsetNodePoolLabel]
-		}
 		ds.Labels[nodeSelectorLabel] = "true"
 	}
 
+	// Restrict the DaemonSet to nodes in the pool named by the service's lbpool label, if set.
+	ds.Spec.Template.Spec.Affinity = nodePoolAffinity(svc.Labels[daemonsetNodePoolLabel])
+
+	// Fetch tolerations from the "svccontroller.k3s.cattle.io/tolerations" annotation on the service
+	// and append them to the DaemonSet's pod tolerations.
+	tolerations, err := k.getTolerations(svc)
+	if err != nil {
+		return nil, err
+	}
+	ds.Spec.Template.Spec.Tolerations = append(ds.Spec.Template.Spec.Tolerations, tolerations...)
+
 	return ds, nil
+}
+
+// nodePoolAffinity returns node affinity restricting pods to nodes belonging to the named pool,
+// or nil if no pool is named. A node is considered part of the pool if it is labeled with either
+// "svccontroller.k3s.cattle.io/lbpool=<pool>" or "lbpool.svccontroller.k3s.cattle.io/<pool>=true".
+// The two forms are listed as separate node selector terms, which are ORed by the scheduler, so
+// that nodes using the older single-pool label are still selected.
+func nodePoolAffinity(pool string) *core.Affinity {
+	if pool == "" {
+		return nil
+	}
+	return &core.Affinity{
+		NodeAffinity: &core.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &core.NodeSelector{
+				NodeSelectorTerms: []core.NodeSelectorTerm{
+					{
+						MatchExpressions: []core.NodeSelectorRequirement{{
+							Key:      daemonsetNodePoolLabel,
+							Operator: core.NodeSelectorOpIn,
+							Values:   []string{pool},
+						}},
+					},
+					{
+						MatchExpressions: []core.NodeSelectorRequirement{{
+							Key:      daemonsetNodePoolPrefix + pool,
+							Operator: core.NodeSelectorOpIn,
+							Values:   []string{"true"},
+						}},
+					},
+				},
+			},
+		},
+	}
 }
 
 // updateDaemonSets ensures that our DaemonSets have a NodeSelector present if one is enabled,
@@ -620,12 +715,14 @@ func (k *k3s) updateDaemonSets() error {
 	}
 
 	for _, ds := range daemonsets {
-		ds.Labels[nodeSelectorLabel] = fmt.Sprintf("%t", enableNodeSelector)
-		ds.Spec.Template.Spec.NodeSelector = map[string]string{}
+		// The cache returns pointers into the shared informer store, so copy before mutating.
+		updated := ds.DeepCopy()
+		updated.Labels[nodeSelectorLabel] = fmt.Sprintf("%t", enableNodeSelector)
+		updated.Spec.Template.Spec.NodeSelector = map[string]string{}
 		if enableNodeSelector {
-			ds.Spec.Template.Spec.NodeSelector[daemonsetNodeLabel] = "true"
+			updated.Spec.Template.Spec.NodeSelector[daemonsetNodeLabel] = "true"
 		}
-		if _, err := k.client.AppsV1().DaemonSets(ds.Namespace).Update(context.TODO(), ds, meta.UpdateOptions{}); err != nil {
+		if _, err := k.client.AppsV1().DaemonSets(updated.Namespace).Update(context.TODO(), updated, meta.UpdateOptions{}); err != nil {
 			return err
 		}
 	}
@@ -658,7 +755,7 @@ func (k *k3s) removeServiceFinalizers(ctx context.Context) error {
 		return err
 	}
 
-	var errs merr.Errors
+	var errs []error
 	for _, svc := range services.Items {
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			s, err := k.removeFinalizer(ctx, &svc)
@@ -669,10 +766,7 @@ func (k *k3s) removeServiceFinalizers(ctx context.Context) error {
 		}
 	}
 
-	if len(errs) > 0 {
-		return errs
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // removeFinalizer ensures that there is not a finalizer for this controller on the Service
@@ -692,9 +786,71 @@ func (k *k3s) removeFinalizer(ctx context.Context, svc *core.Service) (*core.Ser
 	return svc, nil
 }
 
+// getPriorityClassName returns the value of the priority class name annotation on the service,
+// or the system default priority class name.
+func (k *k3s) getPriorityClassName(svc *core.Service) string {
+	if svc != nil {
+		if v, ok := svc.Annotations[priorityAnnotation]; ok {
+			return v
+		}
+	}
+	return k.LBDefaultPriorityClassName
+}
+
+// getTolerations retrieves the tolerations from a service's annotations.
+// It parses the tolerations from a JSON or YAML string stored in the annotations.
+func (k *k3s) getTolerations(svc *core.Service) ([]core.Toleration, error) {
+	tolerationsStr, ok := svc.Annotations[tolerationsAnnotation]
+	if !ok {
+		return []core.Toleration{}, nil
+	}
+
+	var tolerations []core.Toleration
+	if err := json.Unmarshal([]byte(tolerationsStr), &tolerations); err != nil {
+		if err := yaml.Unmarshal([]byte(tolerationsStr), &tolerations); err != nil {
+			return nil, fmt.Errorf("failed to parse tolerations from annotation %s: %v", tolerationsAnnotation, err)
+		}
+	}
+
+	for i := range tolerations {
+		if err := validateToleration(&tolerations[i]); err != nil {
+			return nil, fmt.Errorf("validation failed for toleration %d: %v", i, err)
+		}
+	}
+
+	return tolerations, nil
+}
+
+// validateToleration ensures a toleration has valid fields according to its operator.
+func validateToleration(toleration *core.Toleration) error {
+	if toleration.Operator == "" {
+		toleration.Operator = core.TolerationOpEqual
+	}
+
+	if toleration.Key == "" && toleration.Operator != core.TolerationOpExists {
+		return errors.New("toleration with empty key must have operator 'Exists'")
+	}
+
+	if toleration.Operator == core.TolerationOpExists && toleration.Value != "" {
+		return errors.New("toleration with operator 'Exists' must have an empty value")
+	}
+
+	return nil
+}
+
 // generateName generates a distinct name for the DaemonSet based on the service name and UID
 func generateName(svc *core.Service) string {
-	return fmt.Sprintf("svclb-%s-%s", svc.Name, svc.UID[:8])
+	name := svc.Name
+	// ensure that the service name plus prefix and uuid aren't overly long, but
+	// don't cut the service name at a trailing hyphen.
+	if len(name) > 48 {
+		trimlen := 48
+		for name[trimlen-1] == '-' {
+			trimlen--
+		}
+		name = name[0:trimlen]
+	}
+	return fmt.Sprintf("svclb-%s-%s", name, svc.UID[:8])
 }
 
 // ingressToString converts a list of LoadBalancerIngress entries to strings
@@ -708,8 +864,4 @@ func ingressToString(ingresses []core.LoadBalancerIngress) []string {
 		}
 	}
 	return parts
-}
-
-func getHostIPsFieldPath() string {
-	return "status.hostIP"
 }
