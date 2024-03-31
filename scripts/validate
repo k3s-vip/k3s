@@ -1,18 +1,21 @@
 #!/bin/bash
 set -e
 
-cd $(dirname $0)/..
-
-echo Running: go mod tidy
-go mod tidy
-
-echo Running: go generate
-GOOS=linux CC=gcc CXX=g++ go generate
+export GIT_PAGER=cat
 
 if [ -n "$SKIP_VALIDATE" ]; then
     echo Skipping validation
     exit
 fi
+
+cd $(dirname $0)/..
+
+echo Running: install script signature checks
+sha256sum -c install.sh.sha256sum
+
+echo Running: go mod tidy
+go mod tidy
+
 echo Running validation
 
 . ./scripts/version.sh
@@ -24,12 +27,6 @@ if [ -n "$DIRTY" ]; then
     exit 1
 fi
 
-echo Running: go version
-if ! go version | grep -s "go version ${VERSION_GOLANG} "; then
-  echo "Unexpected $(go version) - Kubernetes ${VERSION_K8S} should be built with go version ${VERSION_GOLANG}"
-  exit 1
-fi
-
 echo Running: go mod verify
 go mod verify
 
@@ -37,10 +34,7 @@ if [ ! -e build/data ];then
     mkdir -p build/data
 fi
 
-if ! command -v golangci-lint; then
-    echo Skipping validation: no golangci-lint available
-    exit
+if [ -z "$SKIP_LINT" ] && command -v golangci-lint; then
+    echo Running: golangci-lint
+    golangci-lint run --timeout=5m
 fi
-
-# echo Running: golangci-lint
-# golangci-lint run -v

@@ -19,34 +19,36 @@ mkdir -p $artifacts
 
 docker ps
 
+export K3S_IMAGE="rancher/k3s:${VERSION_TAG}${SUFFIX}"
+export VERSION_K8S # used by the sonobuoy tests subprocess
 # ---
-# Only run basic tests on non amd64 archs, we use GitHub Actions for amd64
-if [ "$ARCH" != 'amd64' ]; then
+# Only run PR tests on arm arch, we use GitHub Actions for amd64 and arm64
+# Run all tests on tag events, as we want test failures to block the release
+if [ "$ARCH" == 'arm' ]; then
 
-  . ./tests/docker/test-run-basics
-  echo "Did test-run-basics $?"
+  go test ./tests/docker/basics/basics_test.go -k3sImage="$K3S_IMAGE" -ci
+  echo "Did go test basics $?"
 
-  . ./tests/docker/test-run-cacerts
-  echo "Did test-run-cacerts $?"
+  # Extract v1.XX minor version for skew and upgrade tests
+  minor_version=$(echo $VERSION_K8S | cut -d '.' -f1,2)
 
-  . ./tests/docker/test-run-bootstraptoken
-  echo "Did test-run-bootstraptoken $?"
+  go test ./tests/docker/cacerts/cacerts_test.go -k3sImage="$K3S_IMAGE" -ci
+  echo "Did go test cacerts $?"
 
-  . ./tests/docker/test-run-upgrade
-  echo "Did test-run-upgrade $?"
+  go test ./tests/docker/skew/skew_test.go -k3sImage="$K3S_IMAGE" -channel="$minor_version" -ci
+  echo "Did go test skew $?"
 
-  . ./tests/docker/test-run-lazypull
-  echo "Did test-run-lazypull $?"
+  go test ./tests/docker/bootstraptoken/bootstraptoken_test.go -k3sImage="$K3S_IMAGE" -ci
+  echo "Did go test bootstraptoken $?"
+
+  go test ./tests/docker/upgrade/upgrade_test.go -k3sImage="$K3S_IMAGE" -channel="$minor_version" -ci
+  echo "Did go test upgrade $?"
+  
+  go test ./tests/docker/lazypull/lazypull_test.go -k3sImage="$K3S_IMAGE" -ci
+  echo "Did go test lazypull $?"
+
 fi
 
-. ./tests/docker/test-run-compat
-echo "Did test-run-compat $?"
-
-. ./tests/docker/test-run-hardened
-echo "Did test-run-hardened $?"
-
-. ./tests/docker/test-run-etcd
-echo "Did test-run-etcd $?"
 
 # ---
 
@@ -54,44 +56,6 @@ echo "Did test-run-etcd $?"
   early-exit "Skipping remaining tests, images not available for $ARCH."
 
 # ---
-
-if [ "$DRONE_BUILD_EVENT" = 'tag' ]; then
-  E2E_OUTPUT=$artifacts test-run-sonobuoy serial
-  echo "Did test-run-sonobuoy serial $?"
-  E2E_OUTPUT=$artifacts test-run-sonobuoy parallel
-  echo "Did test-run-sonobuoy parallel $?"
-  early-exit 'Skipping remaining tests on tag.'
-fi
-# ---
-
-if [ "$DRONE_BUILD_EVENT" = 'cron' ]; then
-  E2E_OUTPUT=$artifacts test-run-sonobuoy serial
-  echo "Did test-run-sonobuoy serial $?"
-  test-run-sonobuoy etcd serial
-  echo "Did test-run-sonobuoy-etcd serial $?"
-  test-run-sonobuoy mysql serial
-  echo "Did test-run-sonobuoy-mysqk serial $?"
-  test-run-sonobuoy postgres serial
-  echo "Did test-run-sonobuoy-postgres serial $?"
-
-  # Wait until all serial tests have finished
-  delay=15
-  (
-  set +x
-  while [ $(count-running-tests) -ge 1 ]; do
-      sleep $delay
-  done
-  )
-
-  E2E_OUTPUT=$artifacts test-run-sonobuoy parallel
-  echo "Did test-run-sonobuoy parallel $?"
-  test-run-sonobuoy etcd parallel
-  echo "Did test-run-sonobuoy-etcd parallel $?"
-  test-run-sonobuoy mysql parallel
-  echo "Did test-run-sonobuoy-mysql parallel $?"
-  test-run-sonobuoy postgres parallel
-  echo "Did test-run-sonobuoy-postgres parallel $?"
-fi
 
 # Wait until all tests have finished
 delay=15
