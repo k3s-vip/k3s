@@ -8,6 +8,7 @@ go mod tidy
 
 echo Running: go generate
 GOOS=linux CC=gcc CXX=g++ go generate
+git diff pkg | grep "^[+-]" | grep -v "byte(" || pwd
 
 if [ -n "$SKIP_VALIDATE" ]; then
     echo Skipping validation
