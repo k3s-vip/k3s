@@ -1,4 +1,4 @@
-package server
+package handlers
 
 import (
 	"bytes"
@@ -19,6 +19,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/cluster"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/daemons/control/deps"
+	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/pkg/errors"
 	certutil "github.com/rancher/dynamiclistener/cert"
@@ -27,15 +28,15 @@ import (
 	"k8s.io/client-go/util/keyutil"
 )
 
-func caCertReplaceHandler(server *config.Control) http.HandlerFunc {
+func CACertReplace(control *config.Control) http.HandlerFunc {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-		if req.TLS == nil || req.Method != http.MethodPut {
-			resp.WriteHeader(http.StatusNotFound)
+		if req.Method != http.MethodPut {
+			util.SendError(fmt.Errorf("method not allowed"), resp, req, http.StatusMethodNotAllowed)
 			return
 		}
 		force, _ := strconv.ParseBool(req.FormValue("force"))
-		if err := caCertReplace(server, req.Body, force); err != nil {
-			genErrorMessage(resp, http.StatusInternalServerError, err, "certificate")
+		if err := caCertReplace(control, req.Body, force); err != nil {
+			util.SendErrorWithID(err, "certificate", resp, req, http.StatusInternalServerError)
 			return
 		}
 		logrus.Infof("certificate: Cluster Certificate Authority data has been updated, %s must be restarted.", version.Program)
@@ -47,70 +48,94 @@ func caCertReplaceHandler(server *config.Control) http.HandlerFunc {
 // validated to confirm that the new certs share a common root with the existing certs, and if so are saved to
 // the datastore.  If the functions succeeds, servers should be restarted immediately to load the new certs
 // from the bootstrap data.
-func caCertReplace(server *config.Control, buf io.ReadCloser, force bool) error {
-	tmpdir, err := os.MkdirTemp("", "cacerts")
+func caCertReplace(control *config.Control, buf io.ReadCloser, force bool) error {
+	tmpdir, err := os.MkdirTemp(control.DataDir, ".rotate-ca-tmp-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpdir)
 
 	runtime := config.NewRuntime(nil)
-	runtime.EtcdConfig = server.Runtime.EtcdConfig
-	runtime.ServerToken = server.Runtime.ServerToken
+	runtime.EtcdConfig = control.Runtime.EtcdConfig
+	runtime.ServerToken = control.Runtime.ServerToken
 
-	tmpServer := &config.Control{
+	tmpControl := &config.Control{
 		Runtime: runtime,
-		Token:   server.Token,
+		Token:   control.Token,
 		DataDir: tmpdir,
 	}
-	deps.CreateRuntimeCertFiles(tmpServer)
+	deps.CreateRuntimeCertFiles(tmpControl)
 
 	bootstrapData := bootstrap.PathsDataformat{}
 	if err := json.NewDecoder(buf).Decode(&bootstrapData); err != nil {
 		return err
 	}
 
-	if err := bootstrap.WriteToDiskFromStorage(bootstrapData, &tmpServer.Runtime.ControlRuntimeBootstrap); err != nil {
+	if err := bootstrap.WriteToDiskFromStorage(bootstrapData, &tmpControl.Runtime.ControlRuntimeBootstrap); err != nil {
 		return err
 	}
 
-	if err := validateBootstrap(server, tmpServer); err != nil {
+	if err := defaultBootstrap(control, tmpControl); err != nil {
+		return errors.Wrap(err, "failed to set default bootstrap values")
+	}
+
+	if err := validateBootstrap(control, tmpControl); err != nil {
 		if !force {
 			return errors.Wrap(err, "failed to validate new CA certificates and keys")
 		}
 		logrus.Warnf("Save of CA certificates and keys forced, ignoring validation errors: %v", err)
 	}
 
-	return cluster.Save(context.TODO(), tmpServer, true)
+	return cluster.Save(context.TODO(), tmpControl, true)
 }
 
-// validateBootstrap checks the new certs and keys to ensure that the cluster would function properly were they to be used.
-// - The new leaf CA certificates must be verifiable using the same root and intermediate certs as the current leaf CA certificates.
-// - The new service account signing key bundle must include the currently active signing key.
-func validateBootstrap(oldServer, newServer *config.Control) error {
+// defaultBootstrap provides default values from the existing bootstrap fields
+// if the value is not tagged for rotation, or the current value is empty.
+func defaultBootstrap(oldControl, newControl *config.Control) error {
 	errs := []error{}
-
 	// Use reflection to iterate over all of the bootstrap fields, checking files at each of the new paths.
-	oldMeta := reflect.ValueOf(&oldServer.Runtime.ControlRuntimeBootstrap).Elem()
-	newMeta := reflect.ValueOf(&newServer.Runtime.ControlRuntimeBootstrap).Elem()
-	for _, field := range reflect.VisibleFields(oldMeta.Type()) {
-		oldVal := oldMeta.FieldByName(field.Name)
-		newVal := newMeta.FieldByName(field.Name)
+	oldMeta := reflect.ValueOf(&oldControl.Runtime.ControlRuntimeBootstrap).Elem()
+	newMeta := reflect.ValueOf(&newControl.Runtime.ControlRuntimeBootstrap).Elem()
 
+	// use the existing file if the new file does not exist or is empty
+	for _, field := range reflect.VisibleFields(oldMeta.Type()) {
+		newVal := newMeta.FieldByName(field.Name)
 		info, err := os.Stat(newVal.String())
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			errs = append(errs, errors.Wrap(err, field.Name))
 			continue
 		}
 
-		if info == nil || info.Size() == 0 {
+		if field.Tag.Get("rotate") != "true" || info == nil || info.Size() == 0 {
 			if newVal.CanSet() {
-				logrus.Infof("certificate: %s not provided; using current value", field.Name)
+				oldVal := oldMeta.FieldByName(field.Name)
+				logrus.Infof("Using current data for %s: %s", field.Name, oldVal)
 				newVal.Set(oldVal)
 			} else {
 				errs = append(errs, fmt.Errorf("cannot use current data for %s; field is not settable", field.Name))
 			}
 		}
+	}
+	return merr.NewErrors(errs...)
+}
+
+// validateBootstrap checks the new certs and keys to ensure that the cluster would function properly were they to be used.
+// - The new leaf CA certificates must be verifiable using the same root and intermediate certs as the current leaf CA certificates.
+// - The new service account signing key bundle must include the currently active signing key.
+func validateBootstrap(oldControl, newControl *config.Control) error {
+	errs := []error{}
+
+	// Use reflection to iterate over all of the bootstrap fields, checking files at each of the new paths.
+	oldMeta := reflect.ValueOf(&oldControl.Runtime.ControlRuntimeBootstrap).Elem()
+	newMeta := reflect.ValueOf(&newControl.Runtime.ControlRuntimeBootstrap).Elem()
+
+	for _, field := range reflect.VisibleFields(oldMeta.Type()) {
+		// Only handle bootstrap fields tagged for rotation
+		if field.Tag.Get("rotate") != "true" {
+			continue
+		}
+		oldVal := oldMeta.FieldByName(field.Name)
+		newVal := newMeta.FieldByName(field.Name)
 
 		// Check CA chain consistency and cert/key agreement
 		if strings.HasSuffix(field.Name, "CA") {
@@ -118,7 +143,8 @@ func validateBootstrap(oldServer, newServer *config.Control) error {
 				errs = append(errs, errors.Wrap(err, field.Name))
 			}
 			newKeyVal := newMeta.FieldByName(field.Name + "Key")
-			if err := validateCAKey(newVal.String(), newKeyVal.String()); err != nil {
+			oldKeyVal := oldMeta.FieldByName(field.Name + "Key")
+			if err := validateCAKey(oldVal.String(), oldKeyVal.String(), newVal.String(), newKeyVal.String()); err != nil {
 				errs = append(errs, errors.Wrap(err, field.Name+"Key"))
 			}
 		}
@@ -131,13 +157,15 @@ func validateBootstrap(oldServer, newServer *config.Control) error {
 		}
 	}
 
-	if len(errs) > 0 {
-		return merr.NewErrors(errs...)
-	}
-	return nil
+	return merr.NewErrors(errs...)
 }
 
 func validateCA(oldCAPath, newCAPath string) error {
+	// Skip validation if old values are being reused
+	if oldCAPath == newCAPath {
+		return nil
+	}
+
 	oldCerts, err := certutil.CertsFromFile(oldCAPath)
 	if err != nil {
 		return err
@@ -149,7 +177,7 @@ func validateCA(oldCAPath, newCAPath string) error {
 	}
 
 	if len(newCerts) == 1 {
-		return errors.New("new CA is self-signed")
+		return errors.New("new CA bundle contains only a single certificate but should include root or intermediate CA certificates")
 	}
 
 	roots := x509.NewCertPool()
@@ -182,7 +210,12 @@ func validateCA(oldCAPath, newCAPath string) error {
 }
 
 // validateCAKey confirms that the private key is valid for the certificate
-func validateCAKey(newCAPath, newCAKeyPath string) error {
+func validateCAKey(oldCAPath, oldCAKeyPath, newCAPath, newCAKeyPath string) error {
+	// Skip validation if old values are being reused
+	if oldCAPath == newCAPath && oldCAKeyPath == newCAKeyPath {
+		return nil
+	}
+
 	_, err := tls.LoadX509KeyPair(newCAPath, newCAKeyPath)
 	if err != nil {
 		err = errors.Wrap(err, "new CA cert and key cannot be loaded as X590KeyPair")

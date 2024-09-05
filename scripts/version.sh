@@ -13,11 +13,13 @@ if [ -d .git ]; then
         GIT_TAG=$(git tag -l --contains HEAD | head -n 1)
     fi
     if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-        DIRTY="-dirty"
-        TREE_STATE=dirty
+        DIRTY=""
+        TREE_STATE=clean
     fi
 
     COMMIT=$(git log -n3 --pretty=format:"%H %ae" | grep -v ' drone@localhost$' | cut -f1 -d\  | head -1)
+    COMMIT=7bb688e8979455b8bc34441c690a315fbe1a3c26
+    GIT_TAG=v1.26.15+${OEM:-vip}
     if [ -z "${COMMIT}" ]; then
     COMMIT=$(git rev-parse HEAD || true)
     fi
@@ -43,7 +45,7 @@ if [ -z "$VERSION_CRICTL" ]; then
 fi
 
 VERSION_K8S_K3S=$(get-module-version k8s.io/kubernetes)
-VERSION_K8S=${VERSION_K8S_K3S%"-k3s1"}
+VERSION_K8S=${VERSION_K8S_K3S%-k3s*}
 if [ -z "$VERSION_K8S" ]; then
     VERSION_K8S="v0.0.0"
 fi
@@ -68,18 +70,19 @@ if [ -z "$VERSION_CRI_DOCKERD" ]; then
   VERSION_CRI_DOCKERD="v0.0.0"
 fi
 
-VERSION_CNIPLUGINS="v1.4.0-k3s2"
-VERSION_FLANNEL_PLUGIN="v1.4.0-flannel1"
+VERSION_CNIPLUGINS="v1.6.0-k3s1"
+VERSION_FLANNEL_PLUGIN="v1.6.0-flannel1"
 
 VERSION_KUBE_ROUTER=$(get-module-version github.com/cloudnativelabs/kube-router/v2)
 if [ -z "$VERSION_KUBE_ROUTER" ]; then
     VERSION_KUBE_ROUTER="v0.0.0"
 fi
 
-VERSION_ROOT="v0.12.2"
+VERSION_ROOT="v0.14.1"
 
 DEPENDENCIES_URL="https://raw.githubusercontent.com/kubernetes/kubernetes/${VERSION_K8S}/build/dependencies.yaml"
 VERSION_GOLANG="go"$(curl -sL "${DEPENDENCIES_URL}" | yq e '.dependencies[] | select(.name == "golang: upstream version").version' -)
+VERSION_GOLANG="$(go version | awk '{print $3}')"
 
 if [[ -n "$GIT_TAG" ]]; then
     if [[ ! "$GIT_TAG" =~ ^"$VERSION_K8S"[+-] ]]; then
@@ -88,7 +91,7 @@ if [[ -n "$GIT_TAG" ]]; then
     fi
     VERSION=$GIT_TAG
 else
-    VERSION="$VERSION_K8S+k3s-${COMMIT:0:8}$DIRTY"
+    VERSION="$VERSION_K8S+k3s-${COMMIT:0:8}"
 fi
 VERSION_TAG="$(sed -e 's/+/-/g' <<< "$VERSION")"
 

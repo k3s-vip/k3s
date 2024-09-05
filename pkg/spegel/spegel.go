@@ -13,13 +13,12 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/remotes/docker"
+	"github.com/k3s-io/k3s/pkg/agent/https"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/rancher/dynamiclistener/cert"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apiserver/pkg/authentication/authenticator"
-	"k8s.io/apiserver/pkg/authentication/request/union"
 	"k8s.io/utils/ptr"
 
 	"github.com/go-logr/logr"
@@ -32,22 +31,19 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/host/peerstore/pstoreds"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"github.com/xenitab/spegel/pkg/metrics"
-	"github.com/xenitab/spegel/pkg/oci"
-	"github.com/xenitab/spegel/pkg/registry"
-	"github.com/xenitab/spegel/pkg/routing"
-	"github.com/xenitab/spegel/pkg/state"
+	"github.com/spegel-org/spegel/pkg/metrics"
+	"github.com/spegel-org/spegel/pkg/oci"
+	"github.com/spegel-org/spegel/pkg/registry"
+	"github.com/spegel-org/spegel/pkg/routing"
+	"github.com/spegel-org/spegel/pkg/state"
 	"k8s.io/component-base/metrics/legacyregistry"
 )
 
 // DefaultRegistry is the default instance of a Spegel distributed registry
 var DefaultRegistry = &Config{
 	Bootstrapper: NewSelfBootstrapper(),
-	HandlerFunc: func(_ *Config, _ *mux.Router) error {
-		return errors.New("not implemented")
-	},
-	AuthFunc: func() authenticator.Request {
-		return union.New(nil)
+	Router: func(context.Context, *config.Node) (*mux.Router, error) {
+		return nil, errors.New("not implemented")
 	},
 }
 
@@ -59,9 +55,6 @@ var (
 
 	resolveLatestTag = false
 )
-
-type authFunc func() authenticator.Request
-type handlerFunc func(config *Config, router *mux.Router) error
 
 // Config holds fields for a distributed registry
 type Config struct {
@@ -89,10 +82,7 @@ type Config struct {
 	Bootstrapper routing.Bootstrapper
 
 	// HandlerFunc will be called to add the registry API handler to an existing router.
-	HandlerFunc handlerFunc
-
-	// Authenticator will be called to retrieve an authenticator used to validate the request to the registry API.
-	AuthFunc authFunc
+	Router https.RouterFunc
 }
 
 // These values are not currently configurable
@@ -147,7 +137,8 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node) error {
 	ipfslog.SetAllLoggers(level)
 
 	// Get containerd client
-	ociClient, err := oci.NewContainerd(nodeConfig.Containerd.Address, registryNamespace, nodeConfig.Containerd.Registry, urls)
+	ociOpts := []oci.Option{oci.WithContentPath(filepath.Join(nodeConfig.Containerd.Root, "io.containerd.content.v1.content"))}
+	ociClient, err := oci.NewContainerd(nodeConfig.Containerd.Address, registryNamespace, nodeConfig.Containerd.Registry, urls, ociOpts...)
 	if err != nil {
 		return errors.Wrap(err, "failed to create OCI client")
 	}
@@ -222,31 +213,28 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node) error {
 		registry.WithResolveRetries(resolveRetries),
 		registry.WithResolveTimeout(resolveTimeout),
 		registry.WithTransport(client.Transport),
+		registry.WithLogger(logr.FromContextOrDiscard(ctx)),
 	}
 	reg := registry.NewRegistry(ociClient, router, registryOpts...)
-	regSvr := reg.Server(":"+c.RegistryPort, logr.FromContextOrDiscard(ctx))
-
-	// Close router on shutdown
-	go func() {
-		<-ctx.Done()
-		router.Close()
-	}()
+	regSvr, err := reg.Server(":" + c.RegistryPort)
+	if err != nil {
+		return errors.Wrap(err, "failed to create spegel registry server")
+	}
 
 	// Track images available in containerd and publish via p2p router
 	go state.Track(ctx, ociClient, router, resolveLatestTag)
 
-	mRouter := mux.NewRouter().SkipClean(true)
-	mRouter.Use(c.authMiddleware())
-	mRouter.PathPrefix("/v2").Handler(regSvr.Handler)
-	mRouter.PathPrefix("/v1-" + version.Program + "/p2p").Handler(c.peerInfo())
-	if err := c.HandlerFunc(c, mRouter); err != nil {
+	mRouter, err := c.Router(ctx, nodeConfig)
+	if err != nil {
 		return err
 	}
+	mRouter.PathPrefix("/v2").Handler(regSvr.Handler)
+	mRouter.PathPrefix("/v1-" + version.Program + "/p2p").Handler(c.peerInfo())
 
 	// Wait up to 5 seconds for the p2p network to find peers. This will return
 	// immediately if the node is bootstrapping from itself.
-	wait.PollImmediateWithContext(ctx, time.Second, resolveTimeout, func(_ context.Context) (bool, error) {
-		return router.Ready()
+	_ = wait.PollImmediateWithContext(ctx, time.Second, resolveTimeout, func(_ context.Context) (bool, error) {
+		return router.Ready(ctx)
 	})
 
 	return nil
@@ -256,27 +244,15 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node) error {
 func (c *Config) peerInfo() http.HandlerFunc {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		client, _, _ := net.SplitHostPort(req.RemoteAddr)
-		info, err := c.Bootstrapper.Get()
-		if err != nil {
+		infos, err := c.Bootstrapper.Get(req.Context())
+		if err != nil || len(infos) == 0 {
 			http.Error(resp, "Internal Error", http.StatusInternalServerError)
 			return
 		}
+		info := infos[0]
 		logrus.Debugf("Serving p2p peer addr %s to client at %s", info, client)
 		resp.WriteHeader(http.StatusOK)
 		resp.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(resp, "%s/p2p/%s", info.Addrs[0].String(), info.ID.Pretty())
+		fmt.Fprintf(resp, "%s/p2p/%s", info.Addrs[0].String(), info.ID.String())
 	})
-}
-
-// authMiddleware calls the configured authenticator to gate access to the registry API
-func (c *Config) authMiddleware() mux.MiddlewareFunc {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
-			if _, ok, err := c.AuthFunc().AuthenticateRequest(req); !ok || err != nil {
-				http.Error(resp, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-			next.ServeHTTP(resp, req)
-		})
-	}
 }

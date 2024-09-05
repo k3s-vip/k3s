@@ -26,7 +26,6 @@ import (
 	"github.com/rancher/wrangler/pkg/objectset"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -119,6 +118,26 @@ func (w *watcher) listFilesIn(base string, force bool) error {
 	if err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
+		}
+		// Descend into symlinked directories, however, only top-level links are followed
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkInfo, err := os.Stat(path)
+			if err != nil {
+				return err
+			}
+			if linkInfo.IsDir() {
+				evalPath, err := filepath.EvalSymlinks(path)
+				if err != nil {
+					return err
+				}
+				filepath.Walk(evalPath, func(path string, info os.FileInfo, err error) error {
+					if err != nil {
+						return err
+					}
+					files[path] = info
+					return nil
+				})
+			}
 		}
 		files[path] = info
 		return nil
@@ -287,7 +306,7 @@ func (w *watcher) delete(path string) error {
 	// ensure that the addon is completely removed before deleting the objectSet,
 	// so return when err == nil, otherwise pods may get stuck terminating
 	w.recorder.Eventf(&addon, corev1.EventTypeNormal, "DeletingManifest", "Deleting manifest at %q", path)
-	if err := w.addons.Delete(addon.Namespace, addon.Name, &metav1.DeleteOptions{}); err == nil || !errors.IsNotFound(err) {
+	if err := w.addons.Delete(addon.Namespace, addon.Name, &metav1.DeleteOptions{}); err == nil || !apierrors.IsNotFound(err) {
 		return err
 	}
 
@@ -303,7 +322,7 @@ func (w *watcher) delete(path string) error {
 // if it cannot be found.
 func (w *watcher) getOrCreateAddon(name string) (apisv1.Addon, error) {
 	addon, err := w.addonCache.Get(metav1.NamespaceSystem, name)
-	if errors.IsNotFound(err) {
+	if apierrors.IsNotFound(err) {
 		addon = apisv1.NewAddon(metav1.NamespaceSystem, name, apisv1.Addon{})
 	} else if err != nil {
 		return apisv1.Addon{}, err

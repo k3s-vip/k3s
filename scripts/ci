@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+export ARCH=$(go env GOHOSTARCH)
+go mod tidy && go mod vendor
+git diff go.mod | grep "^[+-]" || pwd
 SCRIPT_DIR=$(dirname $0)
 pushd $SCRIPT_DIR
 

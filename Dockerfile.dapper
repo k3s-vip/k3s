@@ -1,4 +1,4 @@
-ARG GOLANG=golang:1.21.8-alpine3.18
+ARG GOLANG=golang:1.23-alpine
 FROM ${GOLANG}
 
 # Set proxy environment variables
@@ -15,36 +15,15 @@ RUN apk -U --no-cache add \
     zlib-dev tar zip squashfs-tools npm coreutils python3 py3-pip openssl-dev libffi-dev libseccomp \
     libseccomp-dev libseccomp-static make libuv-static sqlite-dev sqlite-static libselinux \
     libselinux-dev zlib-dev zlib-static zstd pigz alpine-sdk binutils-gold btrfs-progs-dev \
-    btrfs-progs-static gawk yq \
+    btrfs-progs-static gawk yq pipx \
     && [ "$(go env GOARCH)" = "amd64" ] && apk -U --no-cache add mingw-w64-gcc || true
 
 # Install AWS CLI
-RUN python3 -m pip install awscli
-
-# Install Trivy
-ENV TRIVY_VERSION="0.49.0"
-RUN case "$(go env GOARCH)" in \
-    arm64) TRIVY_ARCH="ARM64" ;; \
-    amd64) TRIVY_ARCH="64bit" ;; \
-    s390x) TRIVY_ARCH="s390x" ;; \
-    *) TRIVY_ARCH="" ;; \
-    esac
-RUN if [ -n "${TRIVY_ARCH}" ]; then \
-        wget --no-verbose "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${TRIVY_ARCH}.tar.gz" \
-        && tar -zxvf "trivy_${TRIVY_VERSION}_Linux-${TRIVY_ARCH}.tar.gz" \
-        && mv trivy /usr/local/bin; \
-    fi
-
-# Install goimports
-RUN GOPROXY=direct go install golang.org/x/tools/cmd/goimports@gopls/v0.11.0
+RUN PIPX_BIN_DIR=/usr/local/bin pipx install awscli
 
 # Cleanup
 RUN rm -rf /go/src /go/pkg
 
-# Install golangci-lint for amd64
-RUN if [ "$(go env GOARCH)" = "amd64" ]; then \
-    curl -sL https://raw.githubusercontent.com/golangci/golangci-lint/v1.51.2/install.sh | sh -s -- v1.51.2;  \
-    fi
 
 # Set SELINUX environment variable
 ARG SELINUX=true
@@ -57,7 +36,7 @@ ENV DAPPER_RUN_ARGS="--privileged -v k3s-cache:/go/src/github.com/k3s-io/k3s/.ca
     DAPPER_OUTPUT="./bin ./dist ./build/out ./build/static ./pkg/static ./pkg/deploy" \
     DAPPER_DOCKER_SOCKET=true \
     CROSS=true \
-    STATIC_BUILD=true
+    STATIC_BUILD=true GODEBUG=gotypesalias=0
 # Set $HOME separately because it refers to $DAPPER_SOURCE, set above
 ENV HOME=${DAPPER_SOURCE}
 
