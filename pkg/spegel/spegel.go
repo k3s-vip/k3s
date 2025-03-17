@@ -145,7 +145,7 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node) error {
 	ipfslog.SetAllLoggers(level)
 
 	// Get containerd client
-	ociOpts := []oci.Option{oci.WithContentPath(filepath.Join(nodeConfig.Containerd.Root, "io.containerd.content.v1.content"))}
+	ociOpts := []oci.ContainerdOption{oci.WithContentPath(filepath.Join(nodeConfig.Containerd.Root, "io.containerd.content.v1.content"))}
 	ociClient, err := oci.NewContainerd(nodeConfig.Containerd.Address, registryNamespace, nodeConfig.Containerd.Registry, urls, ociOpts...)
 	if err != nil {
 		return pkgerrors.WithMessage(err, "failed to create OCI client")

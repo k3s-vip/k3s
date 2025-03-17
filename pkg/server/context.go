@@ -3,10 +3,10 @@ package server
 import (
 	"context"
 
-	"github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io"
 	helmcrd "github.com/k3s-io/helm-controller/pkg/crd"
 	"github.com/k3s-io/helm-controller/pkg/generated/controllers/helm.cattle.io"
 	addoncrd "github.com/k3s-io/k3s/pkg/crd"
+	"github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
 	pkgerrors "github.com/pkg/errors"
