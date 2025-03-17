@@ -36,7 +36,7 @@ import (
 	pkgerrors "github.com/pkg/errors"
 	certutil "github.com/rancher/dynamiclistener/cert"
 	"github.com/rancher/wharfie/pkg/registries"
-	"github.com/rancher/wrangler/v3/pkg/slice"
+	"github.com/rancher/wrangler/pkg/slice"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/wait"
