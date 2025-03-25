@@ -39,7 +39,7 @@ func RotateBootstrapToken(ctx context.Context, config *config.Control, oldToken 
 	tokenKey := storageKey(normalizedToken)
 
 	var bootstrapList []client.Value
-	if err := wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+	if err := wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
 		bootstrapList, err = storageClient.List(ctx, "/bootstrap", 0)
 		if err != nil {
 			return false, err
@@ -198,7 +198,7 @@ func (c *Cluster) storageBootstrap(ctx context.Context) error {
 
 	attempts := 0
 	tokenKey := storageKey(normalizedToken)
-	return wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+	return wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
 		attempts++
 
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -281,7 +281,7 @@ func getBootstrapKeyFromStorage(ctx context.Context, storageClient client.Client
 	var bootstrapList []client.Value
 	var err error
 
-	if err := wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+	if err := wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
 		bootstrapList, err = storageClient.List(ctx, "/bootstrap", 0)
 		if err != nil {
 			if errors.Is(err, rpctypes.ErrGPRCNotSupportedForLearner) {
