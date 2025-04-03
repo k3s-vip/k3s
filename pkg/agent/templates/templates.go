@@ -196,7 +196,7 @@ skip_verify = true
 {{ end -}}
 `
 
-func ParseTemplateFromConfig(templateBuffer string, config interface{}) (string, error) {
+func ParseTemplateFromConfig(templateBuffer string, config any) (string, error) {
 	out := new(bytes.Buffer)
 	t := template.Must(template.New("compiled_template").Funcs(templateFuncs).Parse(templateBuffer))
 	template.Must(t.New("base").Parse(ContainerdConfigTemplate))
@@ -206,7 +206,7 @@ func ParseTemplateFromConfig(templateBuffer string, config interface{}) (string,
 	return out.String(), nil
 }
 
-func ParseHostsTemplateFromConfig(templateBuffer string, config interface{}) (string, error) {
+func ParseHostsTemplateFromConfig(templateBuffer string, config any) (string, error) {
 	out := new(bytes.Buffer)
 	t := template.Must(template.New("compiled_template").Funcs(templateFuncs).Parse(templateBuffer))
 	if err := t.Execute(out, config); err != nil {
