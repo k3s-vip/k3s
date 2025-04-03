@@ -11,29 +11,31 @@ import (
 
 const scheme = "etcd-endpoint"
 
-type EtcdSimpleResolver struct {
+type SimpleResolver struct {
 	*manual.Resolver
 	endpoint string
 }
 
-// Cribbed from https://github.com/etcd-io/etcd/blob/v3.5.16/client/v3/internal/resolver/resolver.go
+// Cribbed from https://github.com/etcd-io/etcd/blob/v3.6.4/client/v3/internal/resolver/resolver.go
 // but only supports a single fixed endpoint. We use this instead of the internal etcd client resolver
 // because the agent loadbalancer handles failover and we don't want etcd or grpc's special behavior.
-func NewSimpleResolver(endpoint string) *EtcdSimpleResolver {
+func NewSimpleResolver(endpoint string) *SimpleResolver {
 	r := manual.NewBuilderWithScheme(scheme)
-	return &EtcdSimpleResolver{Resolver: r, endpoint: endpoint}
+	return &SimpleResolver{Resolver: r, endpoint: endpoint}
 }
 
-func (r *EtcdSimpleResolver) Build(target resolver.Target, cc resolver.ClientConn, opts resolver.BuildOptions) (resolver.Resolver, error) {
+func (r *SimpleResolver) Build(target resolver.Target, cc resolver.ClientConn, opts resolver.BuildOptions) (resolver.Resolver, error) {
 	res, err := r.Resolver.Build(target, cc, opts)
 	if err != nil {
 		return nil, err
 	}
-
-	if r.CC != nil {
+	if cc != nil {
 		addr, serverName := interpret(r.endpoint)
+		a := resolver.Address{Addr: addr, ServerName: serverName}
 		r.UpdateState(resolver.State{
-			Addresses: []resolver.Address{{Addr: addr, ServerName: serverName}},
+			Endpoints: []resolver.Endpoint{
+				{Addresses: []resolver.Address{a}},
+			},
 		})
 	}
 
