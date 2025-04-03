@@ -2,43 +2,46 @@ package spegel
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/containerd/containerd/remotes/docker"
-	"github.com/k3s-io/k3s/pkg/agent/https"
-	"github.com/k3s-io/k3s/pkg/clientaccess"
-	"github.com/k3s-io/k3s/pkg/daemons/config"
-	"github.com/k3s-io/k3s/pkg/server/auth"
-	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/rancher/dynamiclistener/cert"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/utils/ptr"
-
 	"github.com/go-logr/logr"
-	"github.com/go-logr/stdr"
-	"github.com/gorilla/mux"
 	leveldb "github.com/ipfs/go-ds-leveldb"
 	ipfslog "github.com/ipfs/go-log/v2"
+	"github.com/k3s-io/k3s/pkg/agent/https"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/server/auth"
+	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/logger"
+	"github.com/k3s-io/k3s/pkg/util/mux"
+	"github.com/k3s-io/k3s/pkg/util/wait"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
+	libp2phost "github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/p2p/host/peerstore/pstoreds"
-	pkgerrors "github.com/pkg/errors"
+	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
+	"github.com/rancher/dynamiclistener/cert"
 	"github.com/sirupsen/logrus"
 	"github.com/spegel-org/spegel/pkg/metrics"
 	"github.com/spegel-org/spegel/pkg/oci"
+	"github.com/spegel-org/spegel/pkg/oci/containerd"
 	"github.com/spegel-org/spegel/pkg/registry"
-	"github.com/spegel-org/spegel/pkg/routing"
-	"github.com/spegel-org/spegel/pkg/state"
+	routing0 "github.com/spegel-org/spegel/pkg/routing"
+	routing "github.com/spegel-org/spegel/pkg/routing/libp2p"
+	"github.com/spegel-org/spegel/pkg/web"
 	"k8s.io/component-base/metrics/legacyregistry"
 )
 
@@ -52,11 +55,16 @@ var DefaultRegistry = &Config{
 
 var (
 	P2pAddressAnnotation = "p2p." + version.Program + ".cattle.io/node-address"
+	P2pMulAddrAnnotation = "p2p." + version.Program + ".cattle.io/node-addresses"
 	P2pEnabledLabel      = "p2p." + version.Program + ".cattle.io/enabled"
 	P2pPortEnv           = version.ProgramUpper + "_P2P_PORT"
 	P2pEnableLatestEnv   = version.ProgramUpper + "_P2P_ENABLE_LATEST"
+	P2PEnableDebugWebEnv = version.ProgramUpper + "_P2P_ENABLE_DEBUG_WEB"
 
+	enableDebugWeb   = false
 	resolveLatestTag = false
+
+	wildcardRegistries = []string{"_default", "*"}
 
 	// Agents request a list of peers when joining, and then again periodically afterwards.
 	// Limit the number of concurrent peer list requests that will be served simultaneously.
@@ -87,15 +95,17 @@ type Config struct {
 	PSK []byte
 
 	// Bootstrapper is the bootstrapper that will be used to discover p2p peers.
-	Bootstrapper routing.Bootstrapper
+	Bootstrapper Bootstrapper
 
 	// HandlerFunc will be called to add the registry API handler to an existing router.
 	Router https.RouterFunc
+
+	router *routing.Router
 }
 
 // These values are not currently configurable
 const (
-	resolveRetries    = 0
+	resolveRetries    = 3
 	resolveTimeout    = time.Second * 5
 	registryNamespace = "k8s.io"
 	defaultRouterPort = "5001"
@@ -108,20 +118,23 @@ func init() {
 }
 
 // Start starts the embedded p2p router, and binds the registry API to an existing HTTP router.
-func (c *Config) Start(ctx context.Context, nodeConfig *config.Node) error {
+func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReady *wait.Chan) error {
 	localAddr := net.JoinHostPort(c.InternalAddress, c.RegistryPort)
 	// distribute images for all configured mirrors. there doesn't need to be a
 	// configured endpoint, just having a key for the registry will do.
-	urls := []url.URL{}
+	urls := []string{}
 	registries := []string{}
 	for host := range nodeConfig.AgentConfig.Registry.Mirrors {
 		if host == localAddr {
 			continue
 		}
-		if u, err := url.Parse("https://" + host); err != nil || docker.IsLocalhost(host) {
+		if _, err := url.Parse("https://" + host); err != nil || docker.IsLocalhost(host) {
 			logrus.Errorf("Distributed registry mirror skipping invalid registry: %s", host)
+		} else if slices.Contains(wildcardRegistries, host) {
+			urls = append(urls, host)
+			registries = append(registries, host)
 		} else {
-			urls = append(urls, *u)
+			urls = append(urls, "https://"+host)
 			registries = append(registries, host)
 		}
 	}
@@ -131,59 +144,92 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node) error {
 		return nil
 	}
 
-	logrus.Infof("Starting distributed registry mirror at https://%s:%s/v2 for registries %v",
-		c.ExternalAddress, c.RegistryPort, registries)
-
-	// set up the various logging logging frameworks
-	level := ipfslog.LevelInfo
-	if logrus.IsLevelEnabled(logrus.DebugLevel) {
-		level = ipfslog.LevelDebug
-		stdlog := log.New(logrus.StandardLogger().Writer(), "spegel ", log.LstdFlags)
-		logger := stdr.NewWithOptions(stdlog, stdr.Options{Verbosity: ptr.To(7)})
-		ctx = logr.NewContext(ctx, logger)
-	}
-	ipfslog.SetAllLoggers(level)
-
-	// Get containerd client
-	ociOpts := []oci.Option{oci.WithContentPath(filepath.Join(nodeConfig.Containerd.Root, "io.containerd.content.v1.content"))}
-	ociClient, err := oci.NewContainerd(nodeConfig.Containerd.Address, registryNamespace, nodeConfig.Containerd.Registry, urls, ociOpts...)
+	filters := []oci.Filter{}
+	regFilter, err := oci.FilterForMirroredRegistries(urls)
 	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to create OCI client")
+		return err
+	}
+	if regFilter != nil {
+		filters = append(filters, *regFilter)
 	}
 
-	// create or load persistent private key
-	keyFile := filepath.Join(nodeConfig.Containerd.Opt, "peer.key")
-	keyBytes, _, err := cert.LoadOrGenerateKeyFile(keyFile, false)
-	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to load or generate p2p private key")
-	}
-	privKey, err := cert.ParsePrivateKeyPEM(keyBytes)
-	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to parse p2p private key")
-	}
-	p2pKey, _, err := crypto.KeyPairFromStdKey(privKey)
-	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to convert p2p private key")
-	}
-
-	// create a peerstore to allow persisting nodes across restarts
-	peerFile := filepath.Join(nodeConfig.Containerd.Opt, "peerstore.db")
-	ds, err := leveldb.NewDatastore(peerFile, nil)
-	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to create peerstore datastore")
-	}
-	ps, err := pstoreds.NewPeerstore(ctx, ds, pstoreds.DefaultOpts())
-	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to create peerstore")
-	}
-
-	// get latest tag configuration override
 	if env := os.Getenv(P2pEnableLatestEnv); env != "" {
 		if b, err := strconv.ParseBool(env); err != nil {
 			logrus.Warnf("Invalid %s value; using default %v", P2pEnableLatestEnv, resolveLatestTag)
 		} else {
 			resolveLatestTag = b
 		}
+	}
+	if !resolveLatestTag {
+		filters = append(filters, oci.RegexFilter{Regex: regexp.MustCompile(`:latest$`)})
+	}
+
+	logrus.Infof("Starting distributed registry mirror at https://%s:%s/v2 for registries %v",
+		c.ExternalAddress, c.RegistryPort, registries)
+
+	// set up the various logging logging frameworks
+	ctx = logger.NewContext(ctx, "spegel")
+	level := ipfslog.LevelInfo
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		level = ipfslog.LevelDebug
+	}
+	ipfslog.SetAllLoggers(level)
+
+	// Get containerd client
+	caCert, err := os.ReadFile(c.ServerCAFile)
+	if err != nil {
+		return errors.WithMessage(err, "failed to read server CA")
+	}
+
+	certPool := x509.NewCertPool()
+	certPool.AppendCertsFromPEM(caCert)
+
+	clientCert, err := tls.LoadX509KeyPair(c.ClientCertFile, c.ClientKeyFile)
+	if err != nil {
+		return err
+	}
+
+	clientOpts := []oci.ClientOption{
+		oci.WithTLS(certPool, []tls.Certificate{clientCert}),
+	}
+	ociClient, err := oci.NewClient(clientOpts...)
+	if err != nil {
+		return err
+	}
+
+	storeOpts := []containerd.ContainerdOption{
+		containerd.WithFilters(filters),
+		containerd.WithContentPath(filepath.Join(nodeConfig.Containerd.Root, "io.containerd.content.v1.content")),
+	}
+	ociStore, err := NewDeferredContainerd(ctx, nodeConfig.Containerd.Address, registryNamespace, storeOpts...)
+	if err != nil {
+		return errors.WithMessage(err, "failed to create OCI store")
+	}
+
+	// create or load persistent private key
+	keyFile := filepath.Join(nodeConfig.Containerd.Opt, "peer.key")
+	keyBytes, _, err := cert.LoadOrGenerateKeyFile(keyFile, false)
+	if err != nil {
+		return errors.WithMessage(err, "failed to load or generate p2p private key")
+	}
+	privKey, err := cert.ParsePrivateKeyPEM(keyBytes)
+	if err != nil {
+		return errors.WithMessage(err, "failed to parse p2p private key")
+	}
+	p2pKey, _, err := crypto.KeyPairFromStdKey(privKey)
+	if err != nil {
+		return errors.WithMessage(err, "failed to convert p2p private key")
+	}
+
+	// create a peerstore to allow persisting nodes across restarts
+	peerFile := filepath.Join(nodeConfig.Containerd.Opt, "peerstore.db")
+	ds, err := leveldb.NewDatastore(peerFile, nil)
+	if err != nil {
+		return errors.WithMessage(err, "failed to create peerstore datastore")
+	}
+	ps, err := pstoreds.NewPeerstore(ctx, ds, pstoreds.DefaultOpts())
+	if err != nil {
+		return errors.WithMessage(err, "failed to create peerstore")
 	}
 
 	// get port and start p2p router
@@ -197,59 +243,120 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node) error {
 	}
 	routerAddr := net.JoinHostPort(c.ExternalAddress, routerPort)
 
+	registryPort, err := strconv.ParseUint(c.RegistryPort, 10, 16)
+	if err != nil {
+		return fmt.Errorf("invalid registry port %q: %w", c.RegistryPort, err)
+	}
+	RegistryPort := routing0.PeerMetadata{RegistryPort: uint16(registryPort)}
 	logrus.Infof("Starting distributed registry P2P node at %s", routerAddr)
-	opts := []libp2p.Option{
-		libp2p.Identity(p2pKey),
-		libp2p.Peerstore(ps),
-		libp2p.PrivateNetwork(c.PSK),
+	opts := []routing.RouterOption{
+		routing.WithLibP2POptions(
+			libp2p.Identity(p2pKey),
+			libp2p.Peerstore(ps),
+			libp2p.PrivateNetwork(c.PSK),
+			libp2p.ChainOptions(libp2p.NoTransports, libp2p.Transport(tcp.NewTCPTransport)),
+		),
 	}
-	router, err := routing.NewP2PRouter(ctx, routerAddr, c.Bootstrapper, c.RegistryPort, opts...)
+	c.router, err = routing.NewRouter(ctx, routerAddr, NewNotSelfBootstrapper(c.Bootstrapper), RegistryPort, opts...)
 	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to create P2P router")
+		return errors.WithMessage(err, "failed to create P2P router")
 	}
-	go router.Run(ctx)
+	go c.router.Run(ctx)
 
-	caCert, err := os.ReadFile(c.ServerCAFile)
-	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to read server CA")
-	}
-	client := clientaccess.GetHTTPClient(caCert, c.ClientCertFile, c.ClientKeyFile)
+	selfID := *libp2phost.InfoFromHost(c.router.Host())
+	go func() {
+		wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+			if err := c.Bootstrapper.Run(ctx, selfID); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return true, nil
+				}
+				logrus.Errorf("P2P bootstrapper exited, will retry in 5 seconds: %v", err)
+				return false, nil
+			}
+			return true, nil
+		})
+	}()
+
 	metrics.Register()
-	registryOpts := []registry.Option{
-		registry.WithLocalAddress(localAddr),
-		registry.WithResolveLatestTag(resolveLatestTag),
+	registryOpts := []registry.RegistryOption{
+		registry.WithRegistryFilters(filters),
 		registry.WithResolveRetries(resolveRetries),
 		registry.WithResolveTimeout(resolveTimeout),
-		registry.WithTransport(client.Transport),
-		registry.WithLogger(logr.FromContextOrDiscard(ctx)),
+		registry.WithOCIClient(ociClient),
 	}
-	reg := registry.NewRegistry(ociClient, router, registryOpts...)
-	regSvr, err := reg.Server(":" + c.RegistryPort)
+	reg, err := registry.NewRegistry(ociStore, c.router, registryOpts...)
 	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to create embedded registry server")
+		return errors.WithMessage(err, "failed to create embedded registry")
+	}
+	regSvr := &http.Server{
+		Addr:    ":" + c.RegistryPort,
+		Handler: reg.Handler(logr.FromContextOrDiscard(ctx)),
 	}
 
-	// Track images available in containerd and publish via p2p router
-	go state.Track(ctx, ociClient, router, resolveLatestTag)
+	go func() {
+		defer ociStore.Close()
+		if err := criReady.Wait(ctx); err != nil {
+			return
+		}
+		wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+			logrus.Debug("Starting embedded registry image state tracker")
+			if err := ociStore.Start(); err != nil {
+				logrus.Errorf("Failed to start deferred OCI store: %v", err)
+				return false, nil
+			}
+			err := routing0.Sync(ctx, c.router, ociStore)
+			if err != nil && errors.Is(err, context.Canceled) {
+				return true, nil
+			}
+			logrus.Errorf("Embedded registry image state tracker exited: %v", err)
+			ociStore.Close()
+			return false, nil
+		})
+	}()
 
 	mRouter, err := c.Router(ctx, nodeConfig)
 	if err != nil {
 		return err
 	}
-	mRouter.PathPrefix("/v2").Handler(regSvr.Handler)
-	sRouter := mRouter.PathPrefix("/v1-{program}/p2p").Subrouter()
+	if env := os.Getenv(P2PEnableDebugWebEnv); env != "" {
+		if b, err := strconv.ParseBool(env); err != nil {
+			logrus.Warnf("Invalid %s value; using default %v", P2PEnableDebugWebEnv, enableDebugWeb)
+		} else {
+			enableDebugWeb = b
+		}
+		if enableDebugWeb {
+			webOpts := []web.WebOption{
+				web.WithOCIClient(ociClient),
+			}
+			debugWebAddr := &url.URL{Scheme: "https", Host: c.ExternalAddress + regSvr.Addr}
+			debugWebSvr, err := web.NewWeb(c.router, ociStore, reg, debugWebAddr, webOpts...)
+			if err != nil {
+				return errors.WithMessage(err, "failed to create distributed registry debug web")
+			}
+			mRouter.Handle("/debug/web/", debugWebSvr.Handler(logr.FromContextOrDiscard(ctx)))
+			logrus.Info("Starting distributed registry debug web at ", debugWebAddr)
+		}
+	}
+	mRouter.Handle("/v2/", regSvr.Handler)
+	sRouter := mRouter.SubRouter("/v1-" + version.Program + "/p2p")
 	sRouter.Use(auth.MaxInFlight(maxNonMutatingPeerInfoRequests, maxMutatingPeerInfoRequests))
-	sRouter.Handle("", c.peerInfo())
+	sRouter.Handle("/", c.peerInfo())
 
-	// Wait up to 5 seconds for the p2p network to find peers. This will return
-	// immediately if the node is bootstrapping from itself.
-	if err := wait.PollUntilContextTimeout(ctx, time.Second, resolveTimeout, true, func(_ context.Context) (bool, error) {
-		ready, _ := router.Ready(ctx)
+	// Wait up to 5 seconds for the p2p network to find peers.
+	if err := wait.PollUntilContextTimeout(ctx, time.Second, resolveTimeout, true, func(ctx context.Context) (bool, error) {
+		ready, _ := c.router.Ready(ctx)
 		return ready, nil
 	}); err != nil {
-		logrus.Warnf("Failed to wait for P2P mesh to become ready, will retry in the background: %v", err)
+		logrus.Warn("Failed to wait for distributed registry to become ready, will retry in the background")
 	}
 	return nil
+}
+
+func (c *Config) Ready(ctx context.Context) (bool, error) {
+	if c.router == nil {
+		return false, nil
+	}
+	return c.router.Ready(ctx)
 }
 
 // peerInfo sends a peer address retrieved from the bootstrapper via HTTP

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -12,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/util"
@@ -105,7 +105,7 @@ func (c *Cluster) initClusterAndHTTPS(ctx context.Context) error {
 		if c.config.Runtime.Handler != nil {
 			c.config.Runtime.Handler.ServeHTTP(rw, req)
 		} else {
-			util.SendError(fmt.Errorf("starting"), rw, req, http.StatusServiceUnavailable)
+			util.SendError(errors.New("starting"), rw, req, http.StatusServiceUnavailable)
 		}
 	})
 
@@ -122,6 +122,10 @@ func (c *Cluster) initClusterAndHTTPS(ctx context.Context) error {
 			certHandler.ServeHTTP(rw, req)
 			handler.ServeHTTP(rw, req)
 		}),
+		// Same values as kubernetes apiserver
+		MaxHeaderBytes:    1 << 20,
+		IdleTimeout:       90 * time.Second,
+		ReadHeaderTimeout: 32 * time.Second,
 	}
 
 	if logrus.IsLevelEnabled(logrus.DebugLevel) {
