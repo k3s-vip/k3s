@@ -3,10 +3,9 @@ package server
 import (
 	"context"
 
-	"github.com/k3s-io/api/pkg/generated/controllers/k3s.cattle.io"
-	helmcrd "github.com/k3s-io/helm-controller/pkg/crd"
 	"github.com/k3s-io/helm-controller/pkg/generated/controllers/helm.cattle.io"
-	addoncrd "github.com/k3s-io/k3s/pkg/crd"
+	addoncrd "github.com/k3s-io/k3s/pkg/crds"
+	"github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
 	pkgerrors "github.com/pkg/errors"
@@ -85,9 +84,5 @@ func registerCrds(ctx context.Context, config *Config, restConfig *rest.Config) 
 }
 
 func crds(config *Config) []crd.CRD {
-	defaultCrds := addoncrd.List()
-	if !config.ControlConfig.DisableHelmController {
-		defaultCrds = append(defaultCrds, helmcrd.List()...)
-	}
-	return defaultCrds
+	return addoncrd.List()
 }
