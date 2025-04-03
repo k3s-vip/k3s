@@ -136,7 +136,7 @@ func (w *Watcher) processNextEventForImages(ctx context.Context, cfg *config.Nod
 	return true
 }
 
-func (w *Watcher) processImageEvent(ctx context.Context, obj interface{}, cfg *config.Node, client *containerd.Client, imageClient runtimeapi.ImageServiceClient) error {
+func (w *Watcher) processImageEvent(ctx context.Context, obj any, cfg *config.Node, client *containerd.Client, imageClient runtimeapi.ImageServiceClient) error {
 	var (
 		key string
 		ok  bool
