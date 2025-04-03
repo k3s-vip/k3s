@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/k3s-io/k3s/pkg/daemons/config"
-	pkgerrors "github.com/pkg/errors"
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -71,20 +71,20 @@ func WriteToDiskFromStorage(files PathsDataformat, bootstrap *config.ControlRunt
 		}
 
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			return pkgerrors.WithMessagef(err, "failed to mkdir %s", filepath.Dir(path))
+			return errors.WithMessagef(err, "failed to mkdir %s", filepath.Dir(path))
 		}
 		if err := os.WriteFile(path, bsf.Content, 0600); err != nil {
-			return pkgerrors.WithMessagef(err, "failed to write to %s", path)
+			return errors.WithMessagef(err, "failed to write to %s", path)
 		}
 		if err := os.Chtimes(path, bsf.Timestamp, bsf.Timestamp); err != nil {
-			return pkgerrors.WithMessagef(err, "failed to update modified time on %s", path)
+			return errors.WithMessagef(err, "failed to update modified time on %s", path)
 		}
 	}
 
 	return nil
 }
 
-func ObjToMap(obj interface{}) (map[string]string, error) {
+func ObjToMap(obj any) (map[string]string, error) {
 	bytes, err := json.Marshal(obj)
 	if err != nil {
 		return nil, err
