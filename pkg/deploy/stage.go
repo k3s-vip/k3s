@@ -4,17 +4,24 @@ package deploy
 
 import (
 	"bytes"
+	"embed"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/k3s-io/k3s/pkg/util/bindata"
 	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
+//go:embed embed/*
+var embedFS embed.FS
+
+var bd = bindata.Bindata{FS: &embedFS, Prefix: "embed"}
+
 func Stage(dataDir string, templateVars map[string]string, skips map[string]bool) error {
 staging:
-	for _, name := range AssetNames() {
+	for _, name := range bd.AssetNames() {
 		nameNoExtension := strings.TrimSuffix(name, filepath.Ext(name))
 		if skips[name] || skips[nameNoExtension] {
 			continue staging
@@ -27,7 +34,7 @@ staging:
 			}
 		}
 
-		content, err := Asset(name)
+		content, err := bd.Asset(name)
 		if err != nil {
 			return err
 		}

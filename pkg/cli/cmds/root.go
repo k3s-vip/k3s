@@ -1,6 +1,8 @@
 package cmds
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -45,4 +47,10 @@ func NewApp() *cli.App {
 	}
 
 	return app
+}
+
+func MustRun(app *cli.App, args []string) {
+	if err := app.Run(args); err != nil && !errors.Is(err, context.Canceled) {
+		logrus.Fatal(err)
+	}
 }

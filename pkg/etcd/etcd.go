@@ -139,7 +139,7 @@ type membershipError struct {
 }
 
 func (e *membershipError) Error() string {
-	return fmt.Sprintf("this server is a not a member of the etcd cluster. Found %v, expect: %s", e.members, e.self)
+	return fmt.Sprintf("this server is not a member of the etcd cluster. Found %v, expect: %s", e.members, e.self)
 }
 
 func (e *membershipError) Is(target error) bool {
@@ -697,7 +697,7 @@ func (e *ETCD) setName(force bool) error {
 		if e.config.ServerNodeName == "" {
 			return errors.New("server node name not set")
 		}
-		e.name = e.config.ServerNodeName + "-" + uuid.New().String()[:8]
+		e.name = e.EndpointName() + strings.ReplaceAll(e.address, ".", "-")
 		if err := os.MkdirAll(filepath.Dir(fileName), 0700); err != nil {
 			return err
 		}
@@ -1208,7 +1208,7 @@ func (e *ETCD) manageLearners(ctx context.Context) {
 		}
 
 		nodes, err := e.getETCDNodes()
-		if err != nil {
+		if err != nil && !errors.Is(err, util.ErrCoreNotReady) {
 			logrus.Warnf("Failed to list nodes with etcd role: %v", err)
 		}
 

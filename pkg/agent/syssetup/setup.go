@@ -22,7 +22,7 @@ func loadKernelModule(moduleName string) {
 	}
 
 	if err := exec.Command("modprobe", "--", moduleName).Run(); err != nil {
-		logrus.Warnf("Failed to load kernel module %v with modprobe", moduleName)
+		logrus.Warnf("Failed to load kernel module %v with modprobe: %v", moduleName, err)
 	}
 }
 
@@ -34,9 +34,9 @@ func Configure(enableIPv6 bool, config *kubeproxyconfig.KubeProxyConntrackConfig
 	loadKernelModule("br_netfilter")
 	loadKernelModule("iptable_nat")
 	loadKernelModule("iptable_filter")
-	loadKernelModule("nft-expr-counter")
-	loadKernelModule("nfnetlink-subsys-11")
-	loadKernelModule("nft-chain-2-nat")
+	loadKernelModule("nft_counter")
+	loadKernelModule("nft_compat")
+	loadKernelModule("nft_chain_nat")
 	if enableIPv6 {
 		loadKernelModule("ip6table_nat")
 		loadKernelModule("ip6table_filter")

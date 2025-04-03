@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"os"
 	"path/filepath"
 
@@ -79,7 +77,5 @@ func main() {
 		cmds.NewCompletionCommand(completion.Run),
 	}
 
-	if err := app.Run(configfilearg.MustParse(os.Args)); err != nil && !errors.Is(err, context.Canceled) {
-		logrus.Fatal(err)
-	}
+	cmds.MustRun(app, configfilearg.MustParse(os.Args))
 }
