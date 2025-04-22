@@ -74,6 +74,8 @@ type ETCDSnapshotS3 struct {
 	SkipSSLVerify bool `json:"skipSSLVerify,omitempty"`
 	// Bucket is the bucket holding the snapshot
 	Bucket string `json:"bucket,omitempty"`
+	// BucketLookup is the bucket lookup type, one of 'auto', 'dns', 'path'. Default if empty is 'auto'.
+	BucketLookup string `json:"bucketLookup,omitempty"`
 	// Region is the region of the S3 service
 	Region string `json:"region,omitempty"`
 	// Prefix is the prefix in which the snapshot file is stored.
