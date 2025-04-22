@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	daemonconfig "github.com/k3s-io/k3s/pkg/daemons/config"
@@ -52,6 +53,23 @@ func (e *Embedded) ETCD(ctx context.Context, args *ETCDConfig, extraArgs []strin
 		return nil
 	}
 
+	extraArgs = func(extraArgs []string) []string {
+		argsStr := strings.Join(extraArgs, ",")
+		for key, value := range map[string]string{
+			"--auto-compaction-mode":           "periodic",
+			"--auto-compaction-retention":      "8h",
+			"--quota-backend-bytes":            "8589934592", // 8Gi
+		} {
+			if !strings.Contains(argsStr, key) {
+				if len(argsStr) != 0 {
+					argsStr = key + "=" + value + "," + argsStr
+				} else {
+					argsStr = key + "=" + value
+				}
+			}
+		}
+		return strings.Split(argsStr, ",")
+	}(extraArgs)
 	configFile, err := args.ToConfigFile(extraArgs)
 	if err != nil {
 		return err
