@@ -31,7 +31,7 @@ const (
 	EgressSelectorModeCluster     = "cluster"
 	EgressSelectorModeDisabled    = "disabled"
 	EgressSelectorModePod         = "pod"
-	CertificateRenewDays          = 90
+	CertificateRenewDays          = 120
 	StreamServerPort              = "10010"
 )
 
@@ -64,6 +64,7 @@ type Node struct {
 type EtcdS3 struct {
 	AccessKey     string          `json:"accessKey,omitempty"`
 	Bucket        string          `json:"bucket,omitempty"`
+	BucketLookup  string          `json:"bucketLookup,omitempty"`
 	ConfigSecret  string          `json:"configSecret,omitempty"`
 	Endpoint      string          `json:"endpoint,omitempty"`
 	EndpointCA    string          `json:"endpointCA,omitempty"`
@@ -117,6 +118,7 @@ type Agent struct {
 	ClusterDomain           string
 	ResolvConf              string
 	RootDir                 string
+	KubeletConfigDir        string
 	KubeConfigKubelet       string
 	KubeConfigKubeProxy     string
 	KubeConfigK3sController string
@@ -175,6 +177,7 @@ type CriticalControlArgs struct {
 	DisableNPC            bool         `cli:"disable-network-policy"`
 	DisableServiceLB      bool         `cli:"disable-service-lb"`
 	EncryptSecrets        bool         `cli:"secrets-encryption"`
+	EncryptProvider       string       `cli:"secrets-encryption-provider"`
 	EmbeddedRegistry      bool         `cli:"embedded-registry"`
 	FlannelBackend        string       `cli:"flannel-backend"`
 	FlannelIPv6Masq       bool         `cli:"flannel-ipv6-masq"`
@@ -330,16 +333,20 @@ type ControlRuntime struct {
 	KubeConfigAPIServer       string
 	KubeConfigCloudController string
 
-	ServingKubeAPICert string
-	ServingKubeAPIKey  string
-	ServingKubeletKey  string
-	ServerToken        string
-	AgentToken         string
-	APIServer          http.Handler
-	Handler            http.Handler
-	HTTPBootstrap      http.Handler
-	Tunnel             http.Handler
-	Authenticator      authenticator.Request
+	ServingKubeAPICert        string
+	ServingKubeAPIKey         string
+	ServingKubeSchedulerCert  string
+	ServingKubeSchedulerKey   string
+	ServingKubeControllerCert string
+	ServingKubeControllerKey  string
+	ServingKubeletKey         string
+	ServerToken               string
+	AgentToken                string
+	APIServer                 http.Handler
+	Handler                   http.Handler
+	HTTPBootstrap             http.Handler
+	Tunnel                    http.Handler
+	Authenticator             authenticator.Request
 
 	EgressSelectorConfig  string
 	CloudControllerConfig string
