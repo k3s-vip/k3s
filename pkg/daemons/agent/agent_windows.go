@@ -48,7 +48,7 @@ func kubeletArgsAndConfig(cfg *config.Agent) (map[string]string, *kubeletconfig.
 		return nil, nil, err
 	}
 	argsMap := map[string]string{
-		"config-dir": cfg.KubeletConfigDir,
+		"config":     filepath.Join(cfg.KubeletConfigDir, "kubelet.conf"),
 		"kubeconfig": cfg.KubeConfigKubelet,
 		// note: KubeletConfiguration will omit this field when marshalling if it is set to 0, so we set it via CLI
 		// https://github.com/k3s-io/k3s/issues/12164
