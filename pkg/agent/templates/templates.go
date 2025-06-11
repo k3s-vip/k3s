@@ -300,7 +300,8 @@ skip_verify = true
 {{ end }}
 [host]
 {{ range $e := .Endpoints -}}
-[host."{{ $e.URL }}"]
+[host."{{ printf "%s://%s:%s%s" $e.URL.Scheme $e.URL.Hostname $e.URL.Port $e.URL.Path }}"]
+  server = "{{ $e.URL }}"
   capabilities = ["pull", "resolve"]
   {{- if $e.OverridePath }}
   override_path = true
