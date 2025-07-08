@@ -31,9 +31,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	toolswatch "k8s.io/client-go/tools/watch"
 	cloudproviderapi "k8s.io/cloud-provider/api"
-	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
-	"k8s.io/kubernetes/pkg/registry/core/node"
+	node "k8s.io/kubernetes/pkg/proxy/util"
 
 	// for client metric registration
 	_ "k8s.io/component-base/metrics/prometheus/restclient"
@@ -44,7 +43,6 @@ import (
 func Prepare(ctx context.Context, wg *sync.WaitGroup, cfg *config.Control) error {
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	logsapi.ReapplyHandling = logsapi.ReapplyHandlingIgnoreUnchanged
 	if err := prepare(ctx, wg, cfg); err != nil {
 		return pkgerrors.WithMessage(err, "preparing server")
 	}
