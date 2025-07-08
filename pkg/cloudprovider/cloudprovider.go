@@ -82,7 +82,7 @@ func init() {
 }
 
 func (k *k3s) Initialize(clientBuilder cloudprovider.ControllerClientBuilder, stop <-chan struct{}) {
-	ctx := wait.ContextForChannel(stop)
+	ctx, _ := wait.ContextForChannel(stop)
 	config := clientBuilder.ConfigOrDie(controllerName)
 	k.client = kubernetes.NewForConfigOrDie(config)
 
