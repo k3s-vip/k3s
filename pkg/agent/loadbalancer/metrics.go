@@ -14,8 +14,7 @@ var (
 
 	loadbalancerState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: version.Program + "_loadbalancer_server_health",
-		Help: "Current health state of loadbalancer backend servers, labeled by loadbalancer name and server address. " +
-			"State is enum of 0=INVALID, 1=FAILED, 2=STANDBY, 3=UNCHECKED, 4=RECOVERING, 5=HEALTHY, 6=PREFERRED, 7=ACTIVE.",
+		Help: "Current health value(0:INVALID,1:FAILED,2:STANDBY,3:UNCHECKED,4:RECOVERING,5:HEALTHY,6:PREFERRED,7:ACTIVE) of loadbalancer server",
 	}, []string{"name", "server"})
 
 	loadbalancerDials = prometheus.NewHistogramVec(prometheus.HistogramOpts{
