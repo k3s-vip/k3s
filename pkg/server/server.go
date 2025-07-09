@@ -9,7 +9,6 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	helmchart "github.com/k3s-io/helm-controller/pkg/controllers/chart"
@@ -75,11 +74,6 @@ func StartServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
 		return pkgerrors.WithMessage(err, "starting kubernetes")
 	}
 
-	wg := &sync.WaitGroup{}
-	wg.Add(len(config.StartupHooks))
-
-	config.ControlConfig.Runtime.StartupHooksWg = wg
-
 	shArgs := cmds.StartupHookArgs{
 		APIServerReady:       executor.APIServerReadyChan(),
 		KubeConfigSupervisor: config.ControlConfig.Runtime.KubeConfigSupervisor,
@@ -87,7 +81,7 @@ func StartServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
 		Disables:             config.ControlConfig.Disables,
 	}
 	for _, hook := range config.StartupHooks {
-		if err := hook(ctx, wg, shArgs); err != nil {
+		if err := hook(ctx, config.ControlConfig.Runtime.StartupHooksWg, shArgs); err != nil {
 			return pkgerrors.WithMessage(err, "startup hook")
 		}
 	}
@@ -114,7 +108,7 @@ func startOnAPIServerReady(ctx context.Context, config *Config) {
 func runControllers(ctx context.Context, config *Config) error {
 	controlConfig := &config.ControlConfig
 
-	sc, err := NewContext(ctx, config, true)
+	sc, err := NewContext(ctx, config)
 	if err != nil {
 		return pkgerrors.WithMessage(err, "failed to create new server context")
 	}
@@ -135,6 +129,7 @@ func runControllers(ctx context.Context, config *Config) error {
 	controlConfig.Runtime.K3s = sc.K3s
 	controlConfig.Runtime.Event = sc.Event
 	controlConfig.Runtime.Core = sc.Core
+	controlConfig.Runtime.Discovery = sc.Discovery
 
 	for name, cb := range controlConfig.Runtime.ClusterControllerStarts {
 		go runOrDie(ctx, name, cb)
@@ -226,7 +221,7 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 		helmchart.DefaultJobImage = config.ControlConfig.SystemDefaultRegistry + "/" + helmchart.DefaultJobImage
 	}
 
-	if !config.ControlConfig.DisableHelmController {
+	if sc.Helm != nil {
 		restConfig, err := util.GetRESTConfig(config.ControlConfig.Runtime.KubeConfigSupervisor)
 		if err != nil {
 			return err
@@ -591,7 +586,6 @@ func setNodeLabelsAndAnnotations(ctx context.Context, nodes v1.NodeClient, confi
 		v, ok := node.Labels[util.ControlPlaneRoleLabelKey]
 		if !ok || v != "true" {
 			node.Labels[util.ControlPlaneRoleLabelKey] = "true"
-			node.Labels[util.MasterRoleLabelKey] = "true"
 		}
 
 		if config.ControlConfig.EncryptSecrets {
