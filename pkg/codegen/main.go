@@ -19,7 +19,7 @@ func main() {
 		Boilerplate:   "scripts/boilerplate.go.txt",
 		Groups: map[string]args.Group{
 			"k3s.cattle.io": {
-				Types: []interface{}{
+				Types: []any{
 					v1.Addon{},
 					v1.ETCDSnapshotFile{},
 				},
