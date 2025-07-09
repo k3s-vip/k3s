@@ -348,7 +348,7 @@ func (c *Cluster) ReconcileBootstrapData(ctx context.Context, buf io.ReadSeeker,
 		serverTLSDir := filepath.Join(c.config.DataDir, "tls")
 		tlsBackupDir := filepath.Join(c.config.DataDir, "tls-"+strconv.Itoa(int(time.Now().Unix())))
 
-		logrus.Infof("Cluster reset: backing up certificates directory to " + tlsBackupDir)
+		logrus.Infof("Cluster reset: backing up certificates directory to %s", tlsBackupDir)
 
 		if _, err := os.Stat(serverTLSDir); err != nil {
 			return pkgerrors.WithMessage(err, "cluster reset failed to stat server TLS dir")
@@ -506,6 +506,10 @@ func (c *Cluster) compareConfig() error {
 	// mode, use the local value to allow for temporary mismatch during upgrades.
 	if clusterControl.CriticalControlArgs.EgressSelectorMode == "" {
 		clusterControl.CriticalControlArgs.EgressSelectorMode = c.config.CriticalControlArgs.EgressSelectorMode
+	}
+	// If the remote server is down-level, for secrets-encryption-key-type
+	if clusterControl.CriticalControlArgs.EncryptProvider == "" {
+		clusterControl.CriticalControlArgs.EncryptProvider = c.config.CriticalControlArgs.EncryptProvider
 	}
 
 	if diff := deep.Equal(c.config.CriticalControlArgs, clusterControl.CriticalControlArgs); diff != nil {
