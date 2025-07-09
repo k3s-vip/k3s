@@ -14,7 +14,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/agent/util"
 	"github.com/rancher/wrangler/pkg/data/convert"
 	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v2"
 )
 
@@ -76,7 +76,7 @@ func (p *Parser) stripInvalidFlags(command string, args []string) ([]string, err
 	validFlags := make(map[string]bool, len(cmdFlags))
 	for _, f := range cmdFlags {
 		//split flags with aliases into 2 entries
-		for _, s := range strings.Split(f.GetName(), ",") {
+		for _, s := range f.Names() {
 			validFlags[s] = true
 		}
 	}
@@ -93,7 +93,7 @@ func (p *Parser) stripInvalidFlags(command string, args []string) ([]string, err
 		if validFlags[mArg] {
 			result = append(result, arg)
 		} else {
-			logrus.Warnf("Unknown flag %s found in config.yaml, skipping\n", strings.Split(arg, "=")[0])
+			logrus.Debug("Unknown flag %s found in config.yaml, skipping\n", strings.Split(arg, "=")[0])
 		}
 	}
 	return result, nil

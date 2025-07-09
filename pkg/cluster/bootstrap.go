@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-test/deep"
@@ -348,7 +349,7 @@ func (c *Cluster) ReconcileBootstrapData(ctx context.Context, buf io.ReadSeeker,
 		serverTLSDir := filepath.Join(c.config.DataDir, "tls")
 		tlsBackupDir := filepath.Join(c.config.DataDir, "tls-"+strconv.Itoa(int(time.Now().Unix())))
 
-		logrus.Infof("Cluster reset: backing up certificates directory to " + tlsBackupDir)
+		logrus.Infof("Cluster reset: backing up certificates directory to %s", tlsBackupDir)
 
 		if _, err := os.Stat(serverTLSDir); err != nil {
 			return pkgerrors.WithMessage(err, "cluster reset failed to stat server TLS dir")
@@ -507,6 +508,10 @@ func (c *Cluster) compareConfig() error {
 	if clusterControl.CriticalControlArgs.EgressSelectorMode == "" {
 		clusterControl.CriticalControlArgs.EgressSelectorMode = c.config.CriticalControlArgs.EgressSelectorMode
 	}
+	// If the remote server is down-level, for secrets-encryption-key-type
+	if clusterControl.CriticalControlArgs.EncryptProvider == "" {
+		clusterControl.CriticalControlArgs.EncryptProvider = c.config.CriticalControlArgs.EncryptProvider
+	}
 
 	if diff := deep.Equal(c.config.CriticalControlArgs, clusterControl.CriticalControlArgs); diff != nil {
 		rc := reflect.ValueOf(clusterControl.CriticalControlArgs).Type()
@@ -542,22 +547,24 @@ func (c *Cluster) reconcileEtcd(ctx context.Context) error {
 	originalConfig := c.config.Runtime.EtcdConfig
 	c.config.Runtime.EtcdConfig = tempConfig
 	reconcileCtx, cancel := context.WithCancel(ctx)
+	wg := &sync.WaitGroup{}
 
 	defer func() {
 		cancel()
 		c.config.Runtime.EtcdConfig = originalConfig
+		wg.Wait()
 	}()
 
 	e := etcd.NewETCD()
 	if err := e.SetControlConfig(c.config); err != nil {
 		return err
 	}
-	if err := e.StartEmbeddedTemporary(reconcileCtx); err != nil {
+	if err := e.StartEmbeddedTemporary(reconcileCtx, wg); err != nil {
 		return err
 	}
 
 	for {
-		if err := e.Test(reconcileCtx); err != nil && !errors.Is(err, etcd.ErrNotMember) {
+		if err := e.Test(reconcileCtx, true); err != nil && !errors.Is(err, etcd.ErrNotMember) {
 			logrus.Infof("Failed to test temporary data store connection: %v", err)
 		} else {
 			logrus.Info(e.EndpointName() + " temporary data store connection OK")

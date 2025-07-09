@@ -49,7 +49,7 @@ func ResolveDataDir(dataDir string) (string, error) {
 // PrepareServer prepares the server for operation. This includes setting paths
 // in ControlConfig, creating any certificates not extracted from the bootstrap
 // data, and binding request handlers.
-func PrepareServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
+func PrepareServer(ctx context.Context, wg *sync.WaitGroup, config *Config, cfg *cmds.Server) error {
 	if err := setupDataDirAndChdir(&config.ControlConfig); err != nil {
 		return err
 	}
@@ -58,7 +58,7 @@ func PrepareServer(ctx context.Context, config *Config, cfg *cmds.Server) error 
 		return err
 	}
 
-	if err := control.Prepare(ctx, &config.ControlConfig); err != nil {
+	if err := control.Prepare(ctx, wg, &config.ControlConfig); err != nil {
 		return err
 	}
 
@@ -70,15 +70,10 @@ func PrepareServer(ctx context.Context, config *Config, cfg *cmds.Server) error 
 // StartServer starts whatever control-plane and etcd components are enabled by
 // the current server configuration, runs startup hooks, starts controllers,
 // and writes the admin kubeconfig.
-func StartServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
-	if err := control.Server(ctx, &config.ControlConfig); err != nil {
+func StartServer(ctx context.Context, wg *sync.WaitGroup, config *Config, cfg *cmds.Server) error {
+	if err := control.Server(ctx, wg, &config.ControlConfig); err != nil {
 		return pkgerrors.WithMessage(err, "starting kubernetes")
 	}
-
-	wg := &sync.WaitGroup{}
-	wg.Add(len(config.StartupHooks))
-
-	config.ControlConfig.Runtime.StartupHooksWg = wg
 
 	shArgs := cmds.StartupHookArgs{
 		APIServerReady:       executor.APIServerReadyChan(),
@@ -87,7 +82,7 @@ func StartServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
 		Disables:             config.ControlConfig.Disables,
 	}
 	for _, hook := range config.StartupHooks {
-		if err := hook(ctx, wg, shArgs); err != nil {
+		if err := hook(ctx, config.ControlConfig.Runtime.StartupHooksWg, shArgs); err != nil {
 			return pkgerrors.WithMessage(err, "startup hook")
 		}
 	}
@@ -114,7 +109,7 @@ func startOnAPIServerReady(ctx context.Context, config *Config) {
 func runControllers(ctx context.Context, config *Config) error {
 	controlConfig := &config.ControlConfig
 
-	sc, err := NewContext(ctx, config, true)
+	sc, err := NewContext(ctx, config)
 	if err != nil {
 		return pkgerrors.WithMessage(err, "failed to create new server context")
 	}
@@ -124,17 +119,22 @@ func runControllers(ctx context.Context, config *Config) error {
 		return pkgerrors.WithMessage(err, "failed to stage files")
 	}
 
-	// run migration before we set controlConfig.Runtime.Core
-	if err := nodepassword.MigrateFile(
-		sc.Core.Core().V1().Secret(),
-		sc.Core.Core().V1().Node(),
-		controlConfig.Runtime.NodePasswdFile); err != nil {
-		logrus.Warn(pkgerrors.WithMessage(err, "error migrating node-password file"))
+	// start the nodepassword controller before we set controlConfig.Runtime.Core
+	if err := nodepassword.Register(ctx, sc.K8s, sc.Core.Core().V1().Secret(), sc.Core.Core().V1().Node()); err != nil {
+		return pkgerrors.WithMessage(err, "failed to start node-password secret controller")
 	}
+
 	controlConfig.Runtime.K8s = sc.K8s
 	controlConfig.Runtime.K3s = sc.K3s
 	controlConfig.Runtime.Event = sc.Event
 	controlConfig.Runtime.Core = sc.Core
+	controlConfig.Runtime.Discovery = sc.Discovery
+
+	// Create a new context to use for wrangler controllers that is
+	// cancelled on a delay after the signal context. This allows other things
+	// (like etcd) to clean up, before wrangler's leader.RunOrDie calls
+	// exit when its context is cancelled.
+	ctx = util.DelayCancel(ctx, util.DefaultContextDelay)
 
 	for name, cb := range controlConfig.Runtime.ClusterControllerStarts {
 		go runOrDie(ctx, name, cb)
@@ -205,7 +205,7 @@ func runOrDie(ctx context.Context, name string, cb leader.Callback) {
 }
 
 // coreControllers starts the following controllers, if they are enabled:
-// * Node controller (manages nodes passwords and coredns hosts file)
+// * Node controller (manages coredns node hosts file)
 // * Helm controller
 // * Secrets encryption
 // * Rootless ports
@@ -213,8 +213,7 @@ func runOrDie(ctx context.Context, name string, cb leader.Callback) {
 func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 	if err := node.Register(ctx,
 		!config.ControlConfig.Skips["coredns"],
-		sc.Core.Core().V1().Secret(),
-		sc.Core.Core().V1().ConfigMap(),
+		sc.K8s,
 		sc.Core.Core().V1().Node()); err != nil {
 		return err
 	}
@@ -226,7 +225,7 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 		helmchart.DefaultJobImage = config.ControlConfig.SystemDefaultRegistry + "/" + helmchart.DefaultJobImage
 	}
 
-	if !config.ControlConfig.DisableHelmController {
+	if sc.Helm != nil {
 		restConfig, err := util.GetRESTConfig(config.ControlConfig.Runtime.KubeConfigSupervisor)
 		if err != nil {
 			return err
@@ -247,7 +246,7 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 			metav1.NamespaceAll,
 			helmcommon.Name,
 			"cluster-admin",
-			strconv.Itoa(config.ControlConfig.APIServerPort),
+			strconv.Itoa(config.ControlConfig.HTTPSPort),
 			k8s,
 			apply,
 			util.BuildControllerEventRecorder(k8s, helmcommon.Name, metav1.NamespaceAll),
@@ -591,7 +590,6 @@ func setNodeLabelsAndAnnotations(ctx context.Context, nodes v1.NodeClient, confi
 		v, ok := node.Labels[util.ControlPlaneRoleLabelKey]
 		if !ok || v != "true" {
 			node.Labels[util.ControlPlaneRoleLabelKey] = "true"
-			node.Labels[util.MasterRoleLabelKey] = "true"
 		}
 
 		if config.ControlConfig.EncryptSecrets {
