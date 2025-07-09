@@ -10,6 +10,7 @@ import (
 	goruntime "runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	systemd "github.com/coreos/go-systemd/v22/daemon"
@@ -32,6 +33,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/nodeconfig"
 	"github.com/k3s-io/k3s/pkg/profile"
 	"github.com/k3s-io/k3s/pkg/rootless"
+	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/spegel"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
@@ -42,10 +44,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
-	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/kubernetes"
+	toolscache "k8s.io/client-go/tools/cache"
 	toolswatch "k8s.io/client-go/tools/watch"
 	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/logs"
@@ -106,12 +107,16 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 	nodeConfig.AgentConfig.EnableIPv4 = enableIPv4
 	nodeConfig.AgentConfig.EnableIPv6 = enableIPv6
 
+	if err := executor.Bootstrap(ctx, nodeConfig, cfg); err != nil {
+		return err
+	}
+
 	if nodeConfig.EmbeddedRegistry {
 		if nodeConfig.Docker || nodeConfig.ContainerRuntimeEndpoint != "" {
 			return errors.New("embedded registry mirror requires embedded containerd")
 		}
 
-		if err := spegel.DefaultRegistry.Start(ctx, nodeConfig); err != nil {
+		if err := spegel.DefaultRegistry.Start(ctx, nodeConfig, executor.CRIReadyChan()); err != nil {
 			return pkgerrors.WithMessage(err, "failed to start embedded registry")
 		}
 	}
@@ -132,10 +137,6 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 		return err
 	}
 
-	if err := executor.Bootstrap(ctx, nodeConfig, cfg); err != nil {
-		return err
-	}
-
 	if !nodeConfig.NoFlannel {
 		if (nodeConfig.FlannelExternalIP) && (len(nodeConfig.AgentConfig.NodeExternalIPs) == 0) {
 			logrus.Warnf("Server has flannel-external-ip flag set but this node does not set node-external-ip. Flannel will use internal address when connecting to this node.")
@@ -147,25 +148,19 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 		}
 	}
 
-	if nodeConfig.Docker {
-		if err := executor.Docker(ctx, nodeConfig); err != nil {
-			return err
-		}
-	} else if nodeConfig.ContainerRuntimeEndpoint == "" {
-		if err := containerd.SetupContainerdConfig(nodeConfig); err != nil {
-			return err
-		}
-		if err := executor.Containerd(ctx, nodeConfig); err != nil {
-			return err
-		}
-	} else {
-		if err := executor.CRI(ctx, nodeConfig); err != nil {
-			return err
-		}
-	}
+	// Create a new context to use for agent components that is cancelled on a
+	// delay after the signal context. This allows other things (like etcd) to
+	// clean up, before agent components exit when their contexts are cancelled.
+	ctx = util.DelayCancel(ctx, util.DefaultContextDelay)
 
 	notifySocket := os.Getenv("NOTIFY_SOCKET")
 	os.Unsetenv("NOTIFY_SOCKET")
+
+	go func() {
+		if err := startCRI(ctx, nodeConfig); err != nil {
+			signals.RequestShutdown(pkgerrors.WithMessage(err, "failed to start container runtime"))
+		}
+	}()
 
 	if err := setupTunnelAndRunAgent(ctx, nodeConfig, cfg, proxy); err != nil {
 		return err
@@ -173,8 +168,9 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 
 	go func() {
 		<-executor.APIServerReadyChan()
-		if err := startNetwork(ctx, nodeConfig); err != nil {
-			logrus.Fatalf("Failed to start networking: %v", err)
+		if err := startNetwork(ctx, &sync.WaitGroup{}, nodeConfig); err != nil {
+			signals.RequestShutdown(pkgerrors.WithMessage(err, "failed to start networking"))
+			return
 		}
 
 		// By default, the server is responsible for notifying systemd
@@ -189,27 +185,41 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 	return nil
 }
 
+// startCRI starts the configured CRI, or waits for an external CRI to be ready.
+func startCRI(ctx context.Context, nodeConfig *daemonconfig.Node) error {
+	if nodeConfig.Docker {
+		return executor.Docker(ctx, nodeConfig)
+	} else if nodeConfig.ContainerRuntimeEndpoint == "" {
+		if err := containerd.SetupContainerdConfig(nodeConfig); err != nil {
+			return err
+		}
+		return executor.Containerd(ctx, nodeConfig)
+	} else {
+		return executor.CRI(ctx, nodeConfig)
+	}
+}
+
 // startNetwork updates the network annotations on the node, and starts flannel
 // and the kube-router netpol controller, if enabled.
-func startNetwork(ctx context.Context, nodeConfig *daemonconfig.Node) error {
+func startNetwork(ctx context.Context, wg *sync.WaitGroup, nodeConfig *daemonconfig.Node) error {
 	// Use the kubelet kubeconfig to update annotations on the local node
 	kubeletClient, err := util.GetClientSet(nodeConfig.AgentConfig.KubeConfigKubelet)
 	if err != nil {
 		return err
 	}
 
-	if err := configureNode(ctx, nodeConfig, kubeletClient.CoreV1().Nodes()); err != nil {
+	if err := configureNode(ctx, nodeConfig, kubeletClient); err != nil {
 		return err
 	}
 
 	if !nodeConfig.NoFlannel {
-		if err := flannel.Run(ctx, nodeConfig); err != nil {
+		if err := flannel.Run(ctx, wg, nodeConfig); err != nil {
 			return err
 		}
 	}
 
 	if !nodeConfig.AgentConfig.DisableNPC {
-		if err := netpol.Run(ctx, nodeConfig); err != nil {
+		if err := netpol.Run(ctx, wg, nodeConfig); err != nil {
 			return err
 		}
 	}
@@ -264,7 +274,7 @@ func getConntrackConfig(nodeConfig *daemonconfig.Node) (*kubeproxyconfig.KubePro
 // RunStandalone bootstraps the executor, but does not run the kubelet or containerd.
 // This allows other bits of code that expect the executor to be set up properly to function
 // even when the agent is disabled.
-func RunStandalone(ctx context.Context, cfg cmds.Agent) error {
+func RunStandalone(ctx context.Context, wg *sync.WaitGroup, cfg cmds.Agent) error {
 	proxy, err := createProxyAndValidateToken(ctx, &cfg)
 	if err != nil {
 		return err
@@ -308,13 +318,13 @@ func RunStandalone(ctx context.Context, cfg cmds.Agent) error {
 
 // Run sets up cgroups, configures the LB proxy, and triggers startup
 // of containerd and kubelet.
-func Run(ctx context.Context, cfg cmds.Agent) error {
+func Run(ctx context.Context, wg *sync.WaitGroup, cfg cmds.Agent) error {
 	if err := cgroups.Validate(); err != nil {
 		return err
 	}
 
 	if cfg.Rootless && !cfg.RootlessAlreadyUnshared {
-		dualNode, err := utilsnet.IsDualStackIPStrings(cfg.NodeIP)
+		dualNode, err := utilsnet.IsDualStackIPStrings(cfg.NodeIP.Value())
 		if err != nil {
 			return err
 		}
@@ -339,9 +349,13 @@ func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Pr
 	if err := os.MkdirAll(agentDir, 0700); err != nil {
 		return nil, err
 	}
-	isIPv6 := utilsnet.IsIPv6(net.ParseIP(util.GetFirstValidIPString(cfg.NodeIP)))
 
-	proxy, err := proxy.NewSupervisorProxy(ctx, !cfg.DisableLoadBalancer, agentDir, cfg.ServerURL, cfg.LBServerPort, isIPv6)
+	_, nodeIPs, err := util.GetHostnameAndIPs(cfg.NodeName, cfg.NodeIP.Value())
+	if err != nil {
+		return nil, pkgerrors.WithMessage(err, "failed to get node name and addresses")
+	}
+
+	proxy, err := proxy.NewSupervisorProxy(ctx, !cfg.DisableLoadBalancer, agentDir, cfg.ServerURL, cfg.LBServerPort, utilsnet.IsIPv6(nodeIPs[0]))
 	if err != nil {
 		return nil, err
 	}
@@ -370,20 +384,10 @@ func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Pr
 
 // configureNode waits for the node object to be created, and if/when it does,
 // ensures that the labels and annotations are up to date.
-func configureNode(ctx context.Context, nodeConfig *daemonconfig.Node, nodes typedcorev1.NodeInterface) error {
+func configureNode(ctx context.Context, nodeConfig *daemonconfig.Node, coreClient kubernetes.Interface) error {
+	nodes := coreClient.CoreV1().Nodes()
 	agentConfig := &nodeConfig.AgentConfig
-	fieldSelector := fields.Set{metav1.ObjectNameField: agentConfig.NodeName}.String()
-	lw := &cache.ListWatch{
-		ListFunc: func(options metav1.ListOptions) (object runtime.Object, e error) {
-			options.FieldSelector = fieldSelector
-			return nodes.List(ctx, options)
-		},
-		WatchFunc: func(options metav1.ListOptions) (i watch.Interface, e error) {
-			options.FieldSelector = fieldSelector
-			return nodes.Watch(ctx, options)
-		},
-	}
-
+	lw := toolscache.NewListWatchFromClient(coreClient.CoreV1().RESTClient(), "nodes", metav1.NamespaceNone, fields.OneTermEqualSelector(metav1.ObjectNameField, agentConfig.NodeName))
 	condition := func(ev watch.Event) (bool, error) {
 		node, ok := ev.Object.(*v1.Node)
 		if !ok {

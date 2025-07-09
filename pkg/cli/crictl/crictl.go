@@ -5,7 +5,7 @@ import (
 	"runtime"
 
 	"github.com/kubernetes-sigs/cri-tools/cmd/crictl"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 )
 
 func Run(ctx *cli.Context) error {
