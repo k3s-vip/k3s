@@ -12,6 +12,7 @@ import (
 	"github.com/k3s-io/kine/pkg/endpoint"
 	"github.com/rancher/wharfie/pkg/registries"
 	"github.com/rancher/wrangler/pkg/generated/controllers/core"
+	"github.com/rancher/wrangler/pkg/generated/controllers/discovery"
 	"github.com/rancher/wrangler/pkg/leader"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
@@ -31,7 +32,7 @@ const (
 	EgressSelectorModeCluster     = "cluster"
 	EgressSelectorModeDisabled    = "disabled"
 	EgressSelectorModePod         = "pod"
-	CertificateRenewDays          = 90
+	CertificateRenewDays          = 120
 	StreamServerPort              = "10010"
 )
 
@@ -64,6 +65,7 @@ type Node struct {
 type EtcdS3 struct {
 	AccessKey     string          `json:"accessKey,omitempty"`
 	Bucket        string          `json:"bucket,omitempty"`
+	BucketLookup  string          `json:"bucketLookup,omitempty"`
 	ConfigSecret  string          `json:"configSecret,omitempty"`
 	Endpoint      string          `json:"endpoint,omitempty"`
 	EndpointCA    string          `json:"endpointCA,omitempty"`
@@ -74,6 +76,7 @@ type EtcdS3 struct {
 	SessionToken  string          `json:"sessionToken,omitempty"`
 	Insecure      bool            `json:"insecure,omitempty"`
 	SkipSSLVerify bool            `json:"skipSSLVerify,omitempty"`
+	Retention     int             `json:"retention,omitempty"`
 	Timeout       metav1.Duration `json:"timeout,omitempty"`
 }
 
@@ -97,6 +100,7 @@ type Containerd struct {
 type CRIDockerd struct {
 	Address string
 	Root    string
+	Debug   bool
 }
 
 type Agent struct {
@@ -117,6 +121,7 @@ type Agent struct {
 	ClusterDomain           string
 	ResolvConf              string
 	RootDir                 string
+	KubeletConfig           string
 	KubeConfigKubelet       string
 	KubeConfigKubeProxy     string
 	KubeConfigK3sController string
@@ -175,6 +180,7 @@ type CriticalControlArgs struct {
 	DisableNPC            bool         `cli:"disable-network-policy"`
 	DisableServiceLB      bool         `cli:"disable-service-lb"`
 	EncryptSecrets        bool         `cli:"secrets-encryption"`
+	EncryptProvider       string       `cli:"secrets-encryption-provider"`
 	EmbeddedRegistry      bool         `cli:"embedded-registry"`
 	FlannelBackend        string       `cli:"flannel-backend"`
 	FlannelIPv6Masq       bool         `cli:"flannel-ipv6-masq"`
@@ -330,16 +336,20 @@ type ControlRuntime struct {
 	KubeConfigAPIServer       string
 	KubeConfigCloudController string
 
-	ServingKubeAPICert string
-	ServingKubeAPIKey  string
-	ServingKubeletKey  string
-	ServerToken        string
-	AgentToken         string
-	APIServer          http.Handler
-	Handler            http.Handler
-	HTTPBootstrap      http.Handler
-	Tunnel             http.Handler
-	Authenticator      authenticator.Request
+	ServingKubeAPICert        string
+	ServingKubeAPIKey         string
+	ServingKubeSchedulerCert  string
+	ServingKubeSchedulerKey   string
+	ServingKubeControllerCert string
+	ServingKubeControllerKey  string
+	ServingKubeletKey         string
+	ServerToken               string
+	AgentToken                string
+	APIServer                 http.Handler
+	Handler                   http.Handler
+	HTTPBootstrap             http.Handler
+	Tunnel                    http.Handler
+	Authenticator             authenticator.Request
 
 	EgressSelectorConfig  string
 	CloudControllerConfig string
@@ -371,8 +381,9 @@ type ControlRuntime struct {
 	ClientETCDKey            string
 
 	K8s        kubernetes.Interface
-	K3s        *k3s.Factory
+	K3s        K3sFactory
 	Core       CoreFactory
+	Discovery  DiscoveryFactory
 	Event      record.EventRecorder
 	EtcdConfig endpoint.ETCDConfig
 }
@@ -383,8 +394,20 @@ type Cluster interface {
 	Start(ctx context.Context) error
 }
 
+type K3sFactory interface {
+	K3s() k3s.Interface
+	Sync(ctx context.Context) error
+	Start(ctx context.Context, defaultThreadiness int) error
+}
+
 type CoreFactory interface {
 	Core() core.Interface
+	Sync(ctx context.Context) error
+	Start(ctx context.Context, defaultThreadiness int) error
+}
+
+type DiscoveryFactory interface {
+	Discovery() discovery.Interface
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, defaultThreadiness int) error
 }

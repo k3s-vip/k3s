@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
@@ -31,9 +30,10 @@ import (
 	"github.com/k3s-io/k3s/pkg/server/auth"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
+	kine "github.com/k3s-io/kine/pkg/app"
 	"github.com/k3s-io/kine/pkg/client"
-	endpoint2 "github.com/k3s-io/kine/pkg/endpoint"
-	cp "github.com/otiai10/copy"
+	"github.com/k3s-io/kine/pkg/endpoint"
+	"github.com/otiai10/copy"
 	pkgerrors "github.com/pkg/errors"
 	certutil "github.com/rancher/dynamiclistener/cert"
 	controllerv1 "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
@@ -42,11 +42,12 @@ import (
 	"github.com/sirupsen/logrus"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	etcdversion "go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/credentials"
 	snapshotv3 "go.etcd.io/etcd/etcdutl/v3/snapshot"
-	"go.etcd.io/etcd/server/v3/etcdserver"
+	errorsv3 "go.etcd.io/etcd/server/v3/etcdserver/errors"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -98,6 +99,7 @@ var (
 	NodeAddressAnnotation = "etcd." + version.Program + ".cattle.io/node-address"
 
 	ErrAddressNotSet    = errors.New("apiserver addresses not yet set")
+	ErrJoinTimeout      = errors.New("MemberAdd request timed out")
 	ErrNotMember        = errNotMember()
 	ErrMemberListFailed = errMemberListFailed()
 )
@@ -220,7 +222,7 @@ func (e *ETCD) Test(ctx context.Context) error {
 	} else if status.IsLearner {
 		return errors.New("this server has not yet been promoted from learner to voting member")
 	} else if status.Leader == 0 {
-		return etcdserver.ErrNoLeader
+		return errorsv3.ErrNoLeader
 	}
 
 	logrus.Infof("Connected to etcd v%s - datastore using %d of %d bytes", status.Version, status.DbSizeInUse, status.DbSize)
@@ -510,6 +512,10 @@ func (e *ETCD) Start(ctx context.Context, clientAccessInfo *clientaccess.Info) e
 							logrus.Infof("Waiting to retrieve etcd cluster member list: %v", err)
 							return false, nil
 						}
+						if errors.Is(err, ErrJoinTimeout) {
+							logrus.Infof("Retrying etcd cluster join: %v", err)
+							return false, nil
+						}
 						return false, err
 					}
 					return true, nil
@@ -619,6 +625,9 @@ func (e *ETCD) join(ctx context.Context, clientAccessInfo *clientaccess.Info) er
 	if add {
 		logrus.Infof("Adding member %s=%s to etcd cluster %v", e.name, e.peerURL(), cluster)
 		if _, err = client.MemberAddAsLearner(clientCtx, []string{e.peerURL()}); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return ErrJoinTimeout
+			}
 			return err
 		}
 		cluster = append(cluster, fmt.Sprintf("%s=%s", e.name, e.peerURL()))
@@ -697,7 +706,7 @@ func (e *ETCD) setName(force bool) error {
 		if e.config.ServerNodeName == "" {
 			return errors.New("server node name not set")
 		}
-		e.name = e.config.ServerNodeName + "-" + uuid.New().String()[:8]
+		e.name = e.config.ServerNodeName + "-" + e.EndpointName()
 		if err := os.MkdirAll(filepath.Dir(fileName), 0700); err != nil {
 			return err
 		}
@@ -784,7 +793,7 @@ func getClient(ctx context.Context, control *config.Control, endpoints ...string
 	}
 
 	if cfg.TLS != nil {
-		creds := credentials.NewBundle(credentials.Config{TLSConfig: cfg.TLS}).TransportCredentials()
+		creds := credentials.NewTransportCredential(cfg.TLS)
 		cfg.DialOptions = append(cfg.DialOptions, grpc.WithTransportCredentials(creds))
 	} else {
 		cfg.DialOptions = append(cfg.DialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -910,14 +919,12 @@ func (e *ETCD) migrateFromSQLite(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	_, err = endpoint2.Listen(ctx, endpoint2.Config{
-		Endpoint: "sqlite://",
-	})
+	_, err = endpoint.Listen(ctx, DefaultEndpointConfig())
 	if err != nil {
 		return err
 	}
 
-	sqliteClient, err := client.New(endpoint2.ETCDConfig{
+	sqliteClient, err := client.New(endpoint.ETCDConfig{
 		Endpoints: []string{"unix://kine.sock"},
 	})
 	if err != nil {
@@ -1073,7 +1080,7 @@ func (e *ETCD) StartEmbeddedTemporary(ctx context.Context) error {
 		conn.Close()
 	}()
 
-	if err := cp.Copy(etcdDataDir, tmpDataDir, cp.Options{PreserveOwner: true}); err != nil {
+	if err := copy.Copy(etcdDataDir, tmpDataDir, copy.Options{PreserveOwner: true}); err != nil {
 		return err
 	}
 
@@ -1706,4 +1713,15 @@ func (e *ETCD) RemoveSelf(ctx context.Context) error {
 
 	// move the data directory to a temp path
 	return os.Rename(dbDir(e.config), oldDataDir)
+}
+
+// DefaultEndpointConfig returns default kine endpoint config, with k3s default
+// behavior of listening on a unix socket, advertising the embedded etcd version,
+// and disabling automatic compaction.
+func DefaultEndpointConfig() endpoint.Config {
+	return kine.Config([]string{
+		"--listen-address=" + endpoint.KineSocket,
+		"--emulated-etcd-version=" + etcdversion.Version,
+		"--compact-interval=0s",
+	})
 }
