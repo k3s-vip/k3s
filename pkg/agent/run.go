@@ -106,12 +106,16 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 	nodeConfig.AgentConfig.EnableIPv4 = enableIPv4
 	nodeConfig.AgentConfig.EnableIPv6 = enableIPv6
 
+	if err := executor.Bootstrap(ctx, nodeConfig, cfg); err != nil {
+		return err
+	}
+
 	if nodeConfig.EmbeddedRegistry {
 		if nodeConfig.Docker || nodeConfig.ContainerRuntimeEndpoint != "" {
 			return errors.New("embedded registry mirror requires embedded containerd")
 		}
 
-		if err := spegel.DefaultRegistry.Start(ctx, nodeConfig); err != nil {
+		if err := spegel.DefaultRegistry.Start(ctx, nodeConfig, executor.CRIReadyChan()); err != nil {
 			return pkgerrors.WithMessage(err, "failed to start embedded registry")
 		}
 	}
@@ -129,10 +133,6 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 	}
 
 	if err := setupCriCtlConfig(cfg, nodeConfig); err != nil {
-		return err
-	}
-
-	if err := executor.Bootstrap(ctx, nodeConfig, cfg); err != nil {
 		return err
 	}
 
@@ -314,7 +314,7 @@ func Run(ctx context.Context, cfg cmds.Agent) error {
 	}
 
 	if cfg.Rootless && !cfg.RootlessAlreadyUnshared {
-		dualNode, err := utilsnet.IsDualStackIPStrings(cfg.NodeIP)
+		dualNode, err := utilsnet.IsDualStackIPStrings(cfg.NodeIP.Value())
 		if err != nil {
 			return err
 		}
@@ -339,7 +339,7 @@ func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Pr
 	if err := os.MkdirAll(agentDir, 0700); err != nil {
 		return nil, err
 	}
-	isIPv6 := utilsnet.IsIPv6(net.ParseIP(util.GetFirstValidIPString(cfg.NodeIP)))
+	isIPv6 := utilsnet.IsIPv6(net.ParseIP(util.GetFirstValidIPString(cfg.NodeIP.Value())))
 
 	proxy, err := proxy.NewSupervisorProxy(ctx, !cfg.DisableLoadBalancer, agentDir, cfg.ServerURL, cfg.LBServerPort, isIPv6)
 	if err != nil {
