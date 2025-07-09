@@ -3,14 +3,13 @@ package proxy
 import (
 	"context"
 	"net"
-	sysnet "net"
 	"net/url"
 	"strconv"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/k3s-io/k3s/pkg/agent/loadbalancer"
-	pkgerrors "github.com/pkg/errors"
+	"github.com/k3s-io/k3s/pkg/util/errors"
 )
 
 type Proxy interface {
@@ -58,7 +57,7 @@ func NewSupervisorProxy(ctx context.Context, lbEnabled bool, dataDir, supervisor
 
 	u, err := url.Parse(p.initialSupervisorURL)
 	if err != nil {
-		return nil, pkgerrors.WithMessagef(err, "failed to parse %s", p.initialSupervisorURL)
+		return nil, errors.WithMessagef(err, "failed to parse %s", p.initialSupervisorURL)
 	}
 	p.fallbackSupervisorAddress = u.Host
 	p.supervisorPort = u.Port()
@@ -117,12 +116,12 @@ func (p *proxy) SetHealthCheck(address string, healthCheck loadbalancer.HealthCh
 func (p *proxy) setSupervisorPort(addresses []string) []string {
 	var newAddresses []string
 	for _, address := range addresses {
-		h, _, err := sysnet.SplitHostPort(address)
+		h, _, err := net.SplitHostPort(address)
 		if err != nil {
 			logrus.Errorf("Failed to parse address %s, dropping: %v", address, err)
 			continue
 		}
-		newAddresses = append(newAddresses, sysnet.JoinHostPort(h, p.supervisorPort))
+		newAddresses = append(newAddresses, net.JoinHostPort(h, p.supervisorPort))
 	}
 	return newAddresses
 }
@@ -140,10 +139,10 @@ func (p *proxy) SetAPIServerPort(port int, isIPv6 bool) error {
 
 	u, err := url.Parse(p.initialSupervisorURL)
 	if err != nil {
-		return pkgerrors.WithMessagef(err, "failed to parse server URL %s", p.initialSupervisorURL)
+		return errors.WithMessagef(err, "failed to parse server URL %s", p.initialSupervisorURL)
 	}
 	p.apiServerPort = strconv.Itoa(port)
-	u.Host = sysnet.JoinHostPort(u.Hostname(), p.apiServerPort)
+	u.Host = net.JoinHostPort(u.Hostname(), p.apiServerPort)
 
 	if p.lbEnabled && p.apiServerLB == nil {
 		lbServerPort := p.lbServerPort
@@ -170,14 +169,14 @@ func (p *proxy) SetAPIServerPort(port int, isIPv6 bool) error {
 // supervisor must be used to bootstrap the agent config, but then switched over to
 // another node running an apiserver once one is available.
 func (p *proxy) SetSupervisorDefault(address string) {
-	host, port, err := sysnet.SplitHostPort(address)
+	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		logrus.Errorf("Failed to parse address %s, dropping: %v", address, err)
 		return
 	}
 	if p.apiServerEnabled {
 		port = p.supervisorPort
-		address = sysnet.JoinHostPort(host, port)
+		address = net.JoinHostPort(host, port)
 	}
 	p.fallbackSupervisorAddress = address
 	if p.supervisorLB == nil {

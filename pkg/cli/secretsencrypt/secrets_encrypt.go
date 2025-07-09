@@ -16,9 +16,9 @@ import (
 	"github.com/k3s-io/k3s/pkg/secretsencrypt"
 	"github.com/k3s-io/k3s/pkg/server"
 	"github.com/k3s-io/k3s/pkg/server/handlers"
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/k3s/pkg/version"
-	pkgerrors "github.com/pkg/errors"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 	"k8s.io/utils/ptr"
 )
 
@@ -44,7 +44,7 @@ func commandPrep(cfg *cmds.Server) (*clientaccess.Info, error) {
 }
 
 func wrapServerError(err error) error {
-	return pkgerrors.WithMessage(err, "see server log for details")
+	return errors.WithMessage(err, "see server log for details")
 }
 
 func Enable(app *cli.Context) error {
@@ -131,17 +131,21 @@ func Status(app *cli.Context) error {
 	}
 
 	var tabBuffer bytes.Buffer
-	w := tabwriter.NewWriter(&tabBuffer, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "\n")
-	fmt.Fprintf(w, "Active\tKey Type\tName\n")
-	fmt.Fprintf(w, "------\t--------\t----\n")
-	if status.ActiveKey != "" {
-		fmt.Fprintf(w, " *\t%s\t%s\n", "AES-CBC", status.ActiveKey)
+	if status.ActiveKey != "" || len(status.InactiveKeys) > 0 {
+		w := tabwriter.NewWriter(&tabBuffer, 0, 0, 2, ' ', 0)
+		fmt.Fprint(w, "\n")
+		fmt.Fprint(w, "Active\tKey Type\tName\n")
+		fmt.Fprint(w, "------\t--------\t----\n")
+		if status.ActiveKey != "" {
+			ak := strings.Split(status.ActiveKey, " ")
+			fmt.Fprintf(w, " *\t%s\t%s\n", ak[0], ak[1])
+		}
+		for _, k := range status.InactiveKeys {
+			ik := strings.Split(k, " ")
+			fmt.Fprintf(w, "\t%s\t%s\n", ik[0], ik[1])
+		}
+		w.Flush()
 	}
-	for _, k := range status.InactiveKeys {
-		fmt.Fprintf(w, "\t%s\t%s\n", "AES-CBC", k)
-	}
-	w.Flush()
 	fmt.Println(statusOutput + tabBuffer.String())
 	return nil
 }
@@ -227,10 +231,10 @@ func RotateKeys(app *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	timeout := 70 * time.Second
+	timeout := 90 * time.Second
 	if err = info.Put("/v1-"+version.Program+"/encrypt/config", b, clientaccess.WithTimeout(timeout)); err != nil {
 		return wrapServerError(err)
 	}
-	fmt.Println("keys rotated, reencryption started")
+	fmt.Println("keys rotated, reencryption finished")
 	return nil
 }
