@@ -23,11 +23,11 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-type SnapshotStatus string
+type Status string
 
 const (
-	SuccessfulStatus SnapshotStatus = "successful"
-	FailedStatus     SnapshotStatus = "failed"
+	SuccessfulStatus Status = "successful"
+	FailedStatus     Status = "failed"
 
 	CompressedExtension = ".zip"
 	MetadataDir         = ".metadata"
@@ -59,15 +59,15 @@ type File struct {
 	Name string `json:"name"`
 	// Location contains the full path of the snapshot. For
 	// local paths, the location will be prefixed with "file://".
-	Location   string         `json:"location,omitempty"`
-	Metadata   string         `json:"metadata,omitempty"`
-	Message    string         `json:"message,omitempty"`
-	NodeName   string         `json:"nodeName,omitempty"`
-	CreatedAt  *metav1.Time   `json:"createdAt,omitempty"`
-	Size       int64          `json:"size,omitempty"`
-	Status     SnapshotStatus `json:"status,omitempty"`
-	S3         *S3Config      `json:"s3Config,omitempty"`
-	Compressed bool           `json:"compressed"`
+	Location   string       `json:"location,omitempty"`
+	Metadata   string       `json:"metadata,omitempty"`
+	Message    string       `json:"message,omitempty"`
+	NodeName   string       `json:"nodeName,omitempty"`
+	CreatedAt  *metav1.Time `json:"createdAt,omitempty"`
+	Size       int64        `json:"size,omitempty"`
+	Status     Status       `json:"status,omitempty"`
+	S3         *S3Config    `json:"s3Config,omitempty"`
+	Compressed bool         `json:"compressed"`
 
 	// these fields are used for the internal representation of the snapshot
 	// to populate other fields before serialization to the legacy configmap.
@@ -169,6 +169,7 @@ func (sf *File) FromETCDSnapshotFile(esf *k3s.ETCDSnapshotFile) {
 				EndpointCA:    esf.Spec.S3.EndpointCA,
 				SkipSSLVerify: esf.Spec.S3.SkipSSLVerify,
 				Bucket:        esf.Spec.S3.Bucket,
+				BucketLookup:  esf.Spec.S3.BucketLookup,
 				Region:        esf.Spec.S3.Region,
 				Folder:        esf.Spec.S3.Prefix,
 				Insecure:      esf.Spec.S3.Insecure,
@@ -243,6 +244,7 @@ func (sf *File) ToETCDSnapshotFile(esf *k3s.ETCDSnapshotFile) {
 			EndpointCA:    sf.S3.EndpointCA,
 			SkipSSLVerify: sf.S3.SkipSSLVerify,
 			Bucket:        sf.S3.Bucket,
+			BucketLookup:  sf.S3.BucketLookup,
 			Region:        sf.S3.Region,
 			Prefix:        sf.S3.Folder,
 			Insecure:      sf.S3.Insecure,
