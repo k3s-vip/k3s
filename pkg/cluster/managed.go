@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -25,7 +26,7 @@ import (
 
 // start starts the database, unless a cluster reset has been requested, in which case
 // it does that instead.
-func (c *Cluster) start(ctx context.Context) error {
+func (c *Cluster) start(ctx context.Context, wg *sync.WaitGroup) error {
 	if c.managedDB == nil {
 		return nil
 	}
@@ -41,12 +42,12 @@ func (c *Cluster) start(ctx context.Context) error {
 	if c.config.ClusterReset {
 		// If we're restoring from a snapshot, don't check the reset-flag - just reset and restore.
 		if c.config.ClusterResetRestorePath != "" {
-			return c.managedDB.Reset(ctx, rebootstrap)
+			return c.managedDB.Reset(ctx, wg, rebootstrap)
 		}
 
 		// If the reset-flag doesn't exist, reset. This will create the reset-flag if it succeeds.
 		if !resetDone {
-			return c.managedDB.Reset(ctx, rebootstrap)
+			return c.managedDB.Reset(ctx, wg, rebootstrap)
 		}
 
 		// The reset-flag exists, ask the user to remove it if they want to reset again.
@@ -61,7 +62,7 @@ func (c *Cluster) start(ctx context.Context) error {
 	}
 
 	// Starting the managed database will clear the reset-flag if set
-	return c.managedDB.Start(ctx, c.clientAccessInfo)
+	return c.managedDB.Start(ctx, wg, c.clientAccessInfo)
 }
 
 // registerDBHandlers registers managed-datastore-specific callbacks, and installs additional HTTP route handlers.
@@ -132,8 +133,7 @@ func (c *Cluster) setupEtcdProxy(ctx context.Context, etcdProxy etcd.Proxy) {
 // deleteNodePasswdSecret wipes out the node password secret after restoration
 func (c *Cluster) deleteNodePasswdSecret(ctx context.Context) {
 	nodeName := os.Getenv("NODE_NAME")
-	secretsClient := c.config.Runtime.Core.Core().V1().Secret()
-	if err := nodepassword.Delete(secretsClient, nodeName); err != nil {
+	if err := nodepassword.Delete(nodeName); err != nil {
 		if apierrors.IsNotFound(err) {
 			logrus.Debugf("Node password secret is not found for node %s", nodeName)
 			return

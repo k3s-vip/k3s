@@ -2,7 +2,6 @@
 // - modified from https://github.com/cloudnativelabs/kube-router/blob/73b1b03b32c5755b240f6c077bb097abe3888314/pkg/controllers/netpol.go
 
 //go:build !windows
-// +build !windows
 
 package netpol
 
@@ -29,7 +28,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/util"
 	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	v1core "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 )
@@ -45,7 +44,7 @@ func init() {
 // https://github.com/cloudnativelabs/kube-router/blob/ee9f6d890d10609284098229fa1e283ab5d83b93/pkg/cmd/kube-router.go#L78
 // It converts the k3s config.Node into kube-router configuration (only the
 // subset of options needed for netpol controller).
-func Run(ctx context.Context, nodeConfig *config.Node) error {
+func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error {
 	set, err := utils.NewIPSet(false)
 	if err != nil {
 		logrus.Warnf("Skipping network policy controller start, ipset unavailable: %v", err)
@@ -68,13 +67,24 @@ func Run(ctx context.Context, nodeConfig *config.Node) error {
 	}
 
 	// kube-router netpol requires addresses to be available in the node object.
-	// Wait until the uninitialized taint has been removed, at which point the addresses should be set.
-	// TODO: Replace with non-deprecated PollUntilContextTimeout when our and Kubernetes code migrate to it
-	if err := wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+	// Wait until the ready condition is updated and the uninitialized taint has
+	// been removed, at which point the addresses should be synced.
+	startTime := time.Now().Truncate(time.Second)
+	if err := wait.PollUntilContextTimeout(ctx, 2*time.Second, util.DefaultAPIServerReadyTimeout, true, func(ctx context.Context) (bool, error) {
+		var readyTime metav1.Time
 		// Get the node object
 		node, err := client.CoreV1().Nodes().Get(ctx, nodeConfig.AgentConfig.NodeName, metav1.GetOptions{})
 		if err != nil {
 			logrus.Infof("Network policy controller waiting to get Node %s: %v", nodeConfig.AgentConfig.NodeName, err)
+			return false, nil
+		}
+		for _, cond := range node.Status.Conditions {
+			if cond.Type == v1.NodeReady && cond.Status == v1.ConditionTrue {
+				readyTime = cond.LastHeartbeatTime
+			}
+		}
+		if readyTime.Time.Before(startTime) {
+			logrus.Debugf("Waiting for Ready condition to be updated for network policy controller")
 			return false, nil
 		}
 		// Check for the taint that should be removed by cloud-provider when the node has been initialized.
@@ -107,9 +117,6 @@ func Run(ctx context.Context, nodeConfig *config.Node) error {
 	stopCh := ctx.Done()
 	healthCh := make(chan *healthcheck.ControllerHeartbeat)
 
-	// We don't use this WaitGroup, but kube-router components require it.
-	var wg sync.WaitGroup
-
 	informerFactory := informers.NewSharedInformerFactory(client, 0)
 	podInformer := informerFactory.Core().V1().Pods().Informer()
 	nsInformer := informerFactory.Core().V1().Namespaces().Informer()
@@ -117,21 +124,21 @@ func Run(ctx context.Context, nodeConfig *config.Node) error {
 	informerFactory.Start(stopCh)
 	informerFactory.WaitForCacheSync(stopCh)
 
-	iptablesCmdHandlers := make(map[v1core.IPFamily]utils.IPTablesHandler, 2)
-	ipSetHandlers := make(map[v1core.IPFamily]utils.IPSetHandler, 2)
+	iptablesCmdHandlers := make(map[v1.IPFamily]utils.IPTablesHandler, 2)
+	ipSetHandlers := make(map[v1.IPFamily]utils.IPSetHandler, 2)
 
 	if nodeConfig.AgentConfig.EnableIPv4 {
 		iptHandler, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
 		if err != nil {
 			return pkgerrors.WithMessage(err, "failed to create iptables handler")
 		}
-		iptablesCmdHandlers[v1core.IPv4Protocol] = iptHandler
+		iptablesCmdHandlers[v1.IPv4Protocol] = iptHandler
 
 		ipset, err := utils.NewIPSet(false)
 		if err != nil {
 			return pkgerrors.WithMessage(err, "failed to create ipset handler")
 		}
-		ipSetHandlers[v1core.IPv4Protocol] = ipset
+		ipSetHandlers[v1.IPv4Protocol] = ipset
 	}
 
 	if nodeConfig.AgentConfig.EnableIPv6 {
@@ -139,13 +146,13 @@ func Run(ctx context.Context, nodeConfig *config.Node) error {
 		if err != nil {
 			return pkgerrors.WithMessage(err, "failed to create iptables handler")
 		}
-		iptablesCmdHandlers[v1core.IPv6Protocol] = ipt6Handler
+		iptablesCmdHandlers[v1.IPv6Protocol] = ipt6Handler
 
 		ipset, err := utils.NewIPSet(true)
 		if err != nil {
 			return pkgerrors.WithMessage(err, "failed to create ipset handler")
 		}
-		ipSetHandlers[v1core.IPv6Protocol] = ipset
+		ipSetHandlers[v1.IPv6Protocol] = ipset
 	}
 
 	// Start kube-router healthcheck controller; netpol requires it
@@ -164,12 +171,12 @@ func Run(ctx context.Context, nodeConfig *config.Node) error {
 	hc.SetAlive()
 
 	wg.Add(1)
-	go hc.RunCheck(healthCh, stopCh, &wg)
+	go hc.RunCheck(healthCh, stopCh, wg)
 
 	wg.Add(1)
-	go metricsRunCheck(mc, healthCh, stopCh, &wg)
+	go metricsRunCheck(mc, healthCh, stopCh, wg)
 
-	npc, err := netpol.NewNetworkPolicyController(client, krConfig, podInformer, npInformer, nsInformer, &sync.Mutex{},
+	npc, err := netpol.NewNetworkPolicyController(client, krConfig, podInformer, npInformer, nsInformer, &sync.Mutex{}, nil,
 		iptablesCmdHandlers, ipSetHandlers)
 	if err != nil {
 		return pkgerrors.WithMessage(err, "unable to initialize network policy controller")
@@ -181,7 +188,7 @@ func Run(ctx context.Context, nodeConfig *config.Node) error {
 
 	wg.Add(1)
 	logrus.Infof("Starting network policy controller version %s, built on %s, %s", version.Version, version.BuildDate, runtime.Version())
-	go npc.Run(healthCh, stopCh, &wg)
+	go npc.Run(healthCh, stopCh, wg)
 
 	return nil
 }
@@ -196,7 +203,7 @@ func metricsRunCheck(mc *krmetrics.Controller, healthChan chan<- *healthcheck.Co
 	krmetrics.DefaultRegisterer.MustRegister(krmetrics.BuildInfo)
 
 	for {
-		healthcheck.SendHeartBeat(healthChan, "MC")
+		healthcheck.SendHeartBeat(healthChan, healthcheck.MetricsController)
 		select {
 		case <-stopCh:
 			t.Stop()

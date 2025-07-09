@@ -13,22 +13,23 @@ if [ -d .git ]; then
         GIT_TAG=$(git tag -l --contains HEAD | head -n 1)
     fi
     if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-        DIRTY="-dirty"
-        TREE_STATE=dirty
+        DIRTY=""
+        TREE_STATE=clean
     fi
 
     COMMIT=$(git log -n3 --pretty=format:"%H %ae" | grep -v ' drone@localhost$' | cut -f1 -d\  | head -1)
+    GIT_TAG=v1.29.15+${OEM:-vip}
     if [ -z "${COMMIT}" ]; then
     COMMIT=$(git rev-parse HEAD || true)
     fi
 fi
 
 get-module-version(){
-  go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $1
+  go list -mod=readonly -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $1
 }
 
 get-module-path(){
-  go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{{end}}' $1
+  go list -mod=readonly -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{{end}}' $1
 }
 
 PKG_CONTAINERD_K3S=$(get-module-path github.com/containerd/containerd)
@@ -43,7 +44,7 @@ if [ -z "$VERSION_CRICTL" ]; then
 fi
 
 VERSION_K8S_K3S=$(get-module-version k8s.io/kubernetes)
-VERSION_K8S=${VERSION_K8S_K3S%-k3s*}
+VERSION_K8S=${VERSION_K8S_K3S%-*}
 if [ -z "$VERSION_K8S" ]; then
     VERSION_K8S="v0.0.0"
 fi
@@ -68,8 +69,8 @@ if [ -z "$VERSION_CRI_DOCKERD" ]; then
   VERSION_CRI_DOCKERD="v0.0.0"
 fi
 
-VERSION_CNIPLUGINS="v1.6.0-k3s1"
-VERSION_FLANNEL_PLUGIN="v1.6.0-flannel1"
+VERSION_CNIPLUGINS="v1.9.0-vip0"
+VERSION_FLANNEL_PLUGIN="v1.9.0-flannel1"
 
 VERSION_KUBE_ROUTER=$(get-module-version github.com/cloudnativelabs/kube-router/v2)
 if [ -z "$VERSION_KUBE_ROUTER" ]; then
@@ -78,8 +79,11 @@ fi
 
 VERSION_ROOT="v0.14.1"
 
+VERSION_HELM_JOB="v0.9.12-build20251215"
+
 DEPENDENCIES_URL="https://raw.githubusercontent.com/kubernetes/kubernetes/${VERSION_K8S}/build/dependencies.yaml"
 VERSION_GOLANG="go"$(curl -sL "${DEPENDENCIES_URL}" | yq e '.dependencies[] | select(.name == "golang: upstream version").version' -)
+VERSION_GOLANG="$(go version | awk '{print $3}')"
 
 if [[ -n "$GIT_TAG" ]]; then
     if [[ ! "$GIT_TAG" =~ ^"$VERSION_K8S"[+-] ]]; then

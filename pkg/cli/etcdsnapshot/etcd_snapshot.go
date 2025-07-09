@@ -24,7 +24,7 @@ import (
 	util2 "github.com/k3s-io/k3s/pkg/util"
 	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/printers"
 )
@@ -55,6 +55,7 @@ func commandSetup(app *cli.Context, cfg *cmds.Server) (*etcd.SnapshotRequest, *c
 		sr.S3 = &config.EtcdS3{
 			AccessKey:     cfg.EtcdS3AccessKey,
 			Bucket:        cfg.EtcdS3BucketName,
+			BucketLookup:  cfg.EtcdS3BucketLookupType,
 			ConfigSecret:  cfg.EtcdS3ConfigSecret,
 			Endpoint:      cfg.EtcdS3Endpoint,
 			EndpointCA:    cfg.EtcdS3EndpointCA,
@@ -64,6 +65,7 @@ func commandSetup(app *cli.Context, cfg *cmds.Server) (*etcd.SnapshotRequest, *c
 			Region:        cfg.EtcdS3Region,
 			SecretKey:     cfg.EtcdS3SecretKey,
 			SkipSSLVerify: cfg.EtcdS3SkipSSLVerify,
+			Retention:     cfg.EtcdS3Retention,
 			Timeout:       metav1.Duration{Duration: cfg.EtcdS3Timeout},
 		}
 		// extend request timeout to allow the S3 operation to complete
@@ -105,7 +107,7 @@ func Save(app *cli.Context) error {
 }
 
 func save(app *cli.Context, cfg *cmds.Server) error {
-	if len(app.Args()) > 0 {
+	if app.Args().Len() > 0 {
 		return util2.ErrCommandNoArgs
 	}
 
@@ -145,12 +147,12 @@ func Delete(app *cli.Context) error {
 	if err := cmds.InitLogging(); err != nil {
 		return err
 	}
-	return delete(app, &cmds.ServerConfig)
+	return deleteSnapshot(app, &cmds.ServerConfig)
 }
 
-func delete(app *cli.Context, cfg *cmds.Server) error {
+func deleteSnapshot(app *cli.Context, cfg *cmds.Server) error {
 	snapshots := app.Args()
-	if len(snapshots) == 0 {
+	if snapshots.Len() == 0 {
 		return errors.New("no snapshots given for removal")
 	}
 
@@ -160,7 +162,7 @@ func delete(app *cli.Context, cfg *cmds.Server) error {
 	}
 
 	sr.Operation = etcd.SnapshotOperationDelete
-	sr.Name = snapshots
+	sr.Name = snapshots.Slice()
 
 	b, err := json.Marshal(sr)
 	if err != nil {
@@ -178,7 +180,7 @@ func delete(app *cli.Context, cfg *cmds.Server) error {
 	for _, name := range resp.Deleted {
 		logrus.Infof("Snapshot %s deleted.", name)
 	}
-	for _, name := range snapshots {
+	for _, name := range snapshots.Slice() {
 		if !slices.Contains(resp.Deleted, name) {
 			logrus.Warnf("Snapshot %s not found.", name)
 		}
