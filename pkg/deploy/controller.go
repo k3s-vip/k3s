@@ -31,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	yamlDecoder "k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
@@ -303,19 +303,23 @@ func (w *watcher) delete(path string) error {
 		return err
 	}
 
-	// ensure that the addon is completely removed before deleting the objectSet,
-	// so return when err == nil, otherwise pods may get stuck terminating
-	w.recorder.Eventf(&addon, corev1.EventTypeNormal, "DeletingManifest", "Deleting manifest at %q", path)
-	if err := w.addons.Delete(addon.Namespace, addon.Name, &metav1.DeleteOptions{}); err == nil || !apierrors.IsNotFound(err) {
-		return err
-	}
-
-	// apply an empty set with owner & gvk data to delete
+	// Apply an empty set with owner & gvk data to delete
 	if err := w.apply.WithOwner(&addon).WithGVK(addonGVKs...).ApplyObjects(); err != nil {
 		return err
 	}
 
-	return os.Remove(path)
+	// Remove the addon file
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+
+	// Delete the addon
+	w.recorder.Eventf(&addon, corev1.EventTypeNormal, "DeletingManifest", "Deleting manifest at %q", path)
+	if err := w.addons.Delete(addon.Namespace, addon.Name, &metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	return nil
 }
 
 // getOrCreateAddon attempts to get an Addon by name from the addon namespace, and creates a new one
@@ -415,7 +419,7 @@ func isEmptyYaml(yaml []byte) bool {
 // yamlToObjects returns an object slice yielded from documents in a chunk of YAML
 func yamlToObjects(in io.Reader) ([]runtime.Object, error) {
 	var result []runtime.Object
-	reader := yamlDecoder.NewYAMLReader(bufio.NewReaderSize(in, 4096))
+	reader := yaml.NewYAMLReader(bufio.NewReaderSize(in, 4096))
 	for {
 		raw, err := reader.Read()
 		if err == io.EOF {
@@ -440,7 +444,7 @@ func yamlToObjects(in io.Reader) ([]runtime.Object, error) {
 
 // Returns one or more objects from a single YAML document
 func toObjects(bytes []byte) ([]runtime.Object, error) {
-	bytes, err := yamlDecoder.ToJSON(bytes)
+	bytes, err := yaml.ToJSON(bytes)
 	if err != nil {
 		return nil, err
 	}
@@ -453,8 +457,8 @@ func toObjects(bytes []byte) ([]runtime.Object, error) {
 	if l, ok := obj.(*unstructured.UnstructuredList); ok {
 		var result []runtime.Object
 		for _, obj := range l.Items {
-			copy := obj
-			result = append(result, &copy)
+			newObj := obj
+			result = append(result, &newObj)
 		}
 		return result, nil
 	}

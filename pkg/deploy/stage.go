@@ -1,5 +1,4 @@
 //go:build !no_stage
-// +build !no_stage
 
 package deploy
 
@@ -27,7 +26,8 @@ staging:
 		if skips[name] || skips[nameNoExtension] {
 			continue staging
 		}
-		namePath := strings.Split(name, string(os.PathSeparator))
+		// nb: embed always uses forward slash as a path separator
+		namePath := strings.Split(name, "/")
 		for i := 1; i < len(namePath); i++ {
 			subPath := filepath.Join(namePath[0:i]...)
 			if skips[subPath] {

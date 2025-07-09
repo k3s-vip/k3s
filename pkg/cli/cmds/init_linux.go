@@ -5,9 +5,9 @@ package cmds
 import (
 	"os"
 
-	"github.com/containerd/containerd/pkg/userns"
+	"github.com/moby/sys/userns"
 	pkgerrors "github.com/pkg/errors"
-	"github.com/rootless-containers/rootlesskit/pkg/parent/cgrouputil"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/parent/cgrouputil"
 )
 
 // EvacuateCgroup2 will handle evacuating the root cgroup in order to enable subtree_control,

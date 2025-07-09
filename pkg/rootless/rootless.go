@@ -1,5 +1,4 @@
 //go:build !windows
-// +build !windows
 
 package rootless
 
@@ -15,10 +14,10 @@ import (
 
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	pkgerrors "github.com/pkg/errors"
-	"github.com/rootless-containers/rootlesskit/pkg/child"
-	"github.com/rootless-containers/rootlesskit/pkg/copyup/tmpfssymlink"
-	"github.com/rootless-containers/rootlesskit/pkg/network/slirp4netns"
-	"github.com/rootless-containers/rootlesskit/pkg/parent"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/child"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/copyup/tmpfssymlink"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/network/slirp4netns"
+	"github.com/rootless-containers/rootlesskit/v2/pkg/parent"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
@@ -81,6 +80,8 @@ func Rootless(stateDir string, enableIPv6 bool) error {
 	if err := parent.Parent(*parentOpt); err != nil {
 		logrus.Fatal(err)
 	}
+
+	//revive:disable-next-line:deep-exit
 	os.Exit(0)
 
 	return nil

@@ -14,7 +14,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/agent/util"
 	"github.com/rancher/wrangler/pkg/data/convert"
 	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v2"
 )
 
@@ -75,8 +75,8 @@ func (p *Parser) stripInvalidFlags(command string, args []string) ([]string, err
 	}
 	validFlags := make(map[string]bool, len(cmdFlags))
 	for _, f := range cmdFlags {
-		//split flags with aliases into 2 entries
-		for _, s := range strings.Split(f.GetName(), ",") {
+		// split flags with aliases into 2 entries
+		for _, s := range f.Names() {
 			validFlags[s] = true
 		}
 	}
@@ -93,7 +93,7 @@ func (p *Parser) stripInvalidFlags(command string, args []string) ([]string, err
 		if validFlags[mArg] {
 			result = append(result, arg)
 		} else {
-			logrus.Warnf("Unknown flag %s found in config.yaml, skipping\n", strings.Split(arg, "=")[0])
+			logrus.Debug("Unknown flag %s found in config.yaml, skipping\n", strings.Split(arg, "=")[0])
 		}
 	}
 	return result, nil
@@ -237,7 +237,7 @@ func dotDFiles(basefile string) (result []string, _ error) {
 		}
 		result = append(result, filepath.Join(basefile+".d", file.Name()))
 	}
-	return
+	return result, nil
 }
 
 // readConfigFile returns a flattened arg list generated from the specified config
@@ -263,7 +263,7 @@ func readConfigFile(file string) (result []string, _ error) {
 	var (
 		keySeen  = map[string]bool{}
 		keyOrder []string
-		values   = map[string]interface{}{}
+		values   = map[string]any{}
 	)
 	for _, file := range files {
 		bytes, err := readConfigFileData(file)
@@ -302,7 +302,7 @@ func readConfigFile(file string) (result []string, _ error) {
 			prefix = "-"
 		}
 
-		if slice, ok := v.([]interface{}); ok {
+		if slice, ok := v.([]any); ok {
 			for _, v := range slice {
 				result = append(result, prefix+k+"="+convert.ToString(v))
 			}
@@ -312,21 +312,21 @@ func readConfigFile(file string) (result []string, _ error) {
 		}
 	}
 
-	return
+	return result, nil
 }
 
-func toSlice(v interface{}) []interface{} {
+func toSlice(v any) []any {
 	switch k := v.(type) {
 	case string:
-		return []interface{}{k}
-	case []interface{}:
+		return []any{k}
+	case []any:
 		return k
 	default:
 		str := strings.TrimSpace(convert.ToString(v))
 		if str == "" {
 			return nil
 		}
-		return []interface{}{str}
+		return []any{str}
 	}
 }
 

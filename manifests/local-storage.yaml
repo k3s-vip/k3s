@@ -62,14 +62,11 @@ spec:
           - key: "node-role.kubernetes.io/control-plane"
             operator: "Exists"
             effect: "NoSchedule"
-          - key: "node-role.kubernetes.io/master"
-            operator: "Exists"
-            effect: "NoSchedule"
       nodeSelector:
         kubernetes.io/os: linux
       containers:
       - name: local-path-provisioner
-        image: "%{SYSTEM_DEFAULT_REGISTRY}%rancher/local-path-provisioner:v0.0.31"
+        image: "%{SYSTEM_DEFAULT_REGISTRY}%rancher/local-path-provisioner:v0.0.34"
         imagePullPolicy: IfNotPresent
         command:
         - local-path-provisioner
@@ -132,5 +129,5 @@ data:
     spec:
       containers:
       - name: helper-pod
-        image: "%{SYSTEM_DEFAULT_REGISTRY}%rancher/mirrored-library-busybox:1.36.1"
+        image: "%{SYSTEM_DEFAULT_REGISTRY}%library/busybox:stable-glibc"
         imagePullPolicy: IfNotPresent

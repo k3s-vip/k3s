@@ -38,6 +38,7 @@ import (
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 )
 
@@ -49,7 +50,7 @@ func ResolveDataDir(dataDir string) (string, error) {
 // PrepareServer prepares the server for operation. This includes setting paths
 // in ControlConfig, creating any certificates not extracted from the bootstrap
 // data, and binding request handlers.
-func PrepareServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
+func PrepareServer(ctx context.Context, wg *sync.WaitGroup, config *Config, cfg *cmds.Server) error {
 	if err := setupDataDirAndChdir(&config.ControlConfig); err != nil {
 		return err
 	}
@@ -58,7 +59,7 @@ func PrepareServer(ctx context.Context, config *Config, cfg *cmds.Server) error 
 		return err
 	}
 
-	if err := control.Prepare(ctx, &config.ControlConfig); err != nil {
+	if err := control.Prepare(ctx, wg, &config.ControlConfig); err != nil {
 		return err
 	}
 
@@ -70,15 +71,10 @@ func PrepareServer(ctx context.Context, config *Config, cfg *cmds.Server) error 
 // StartServer starts whatever control-plane and etcd components are enabled by
 // the current server configuration, runs startup hooks, starts controllers,
 // and writes the admin kubeconfig.
-func StartServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
-	if err := control.Server(ctx, &config.ControlConfig); err != nil {
+func StartServer(ctx context.Context, wg *sync.WaitGroup, config *Config, cfg *cmds.Server) error {
+	if err := control.Server(ctx, wg, &config.ControlConfig); err != nil {
 		return pkgerrors.WithMessage(err, "starting kubernetes")
 	}
-
-	wg := &sync.WaitGroup{}
-	wg.Add(len(config.StartupHooks))
-
-	config.ControlConfig.Runtime.StartupHooksWg = wg
 
 	shArgs := cmds.StartupHookArgs{
 		APIServerReady:       executor.APIServerReadyChan(),
@@ -87,7 +83,7 @@ func StartServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
 		Disables:             config.ControlConfig.Disables,
 	}
 	for _, hook := range config.StartupHooks {
-		if err := hook(ctx, wg, shArgs); err != nil {
+		if err := hook(ctx, config.ControlConfig.Runtime.StartupHooksWg, shArgs); err != nil {
 			return pkgerrors.WithMessage(err, "startup hook")
 		}
 	}
@@ -114,7 +110,7 @@ func startOnAPIServerReady(ctx context.Context, config *Config) {
 func runControllers(ctx context.Context, config *Config) error {
 	controlConfig := &config.ControlConfig
 
-	sc, err := NewContext(ctx, config, true)
+	sc, err := NewContext(ctx, config)
 	if err != nil {
 		return pkgerrors.WithMessage(err, "failed to create new server context")
 	}
@@ -124,17 +120,22 @@ func runControllers(ctx context.Context, config *Config) error {
 		return pkgerrors.WithMessage(err, "failed to stage files")
 	}
 
-	// run migration before we set controlConfig.Runtime.Core
-	if err := nodepassword.MigrateFile(
-		sc.Core.Core().V1().Secret(),
-		sc.Core.Core().V1().Node(),
-		controlConfig.Runtime.NodePasswdFile); err != nil {
-		logrus.Warn(pkgerrors.WithMessage(err, "error migrating node-password file"))
+	// start the nodepassword controller before we set controlConfig.Runtime.Core
+	if err := nodepassword.Register(ctx, sc.K8s, sc.Core.Core().V1().Secret(), sc.Core.Core().V1().Node()); err != nil {
+		return pkgerrors.WithMessage(err, "failed to start node-password secret controller")
 	}
+
 	controlConfig.Runtime.K8s = sc.K8s
 	controlConfig.Runtime.K3s = sc.K3s
 	controlConfig.Runtime.Event = sc.Event
 	controlConfig.Runtime.Core = sc.Core
+	controlConfig.Runtime.Discovery = sc.Discovery
+
+	// Create a new context to use for wrangler controllers that is
+	// cancelled on a delay after the signal context. This allows other things
+	// (like etcd) to clean up, before wrangler's leader.RunOrDie calls
+	// exit when its context is cancelled.
+	ctx = util.DelayCancel(ctx, util.DefaultContextDelay)
 
 	for name, cb := range controlConfig.Runtime.ClusterControllerStarts {
 		go runOrDie(ctx, name, cb)
@@ -205,7 +206,7 @@ func runOrDie(ctx context.Context, name string, cb leader.Callback) {
 }
 
 // coreControllers starts the following controllers, if they are enabled:
-// * Node controller (manages nodes passwords and coredns hosts file)
+// * Node controller (manages coredns node hosts file)
 // * Helm controller
 // * Secrets encryption
 // * Rootless ports
@@ -213,20 +214,20 @@ func runOrDie(ctx context.Context, name string, cb leader.Callback) {
 func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 	if err := node.Register(ctx,
 		!config.ControlConfig.Skips["coredns"],
-		sc.Core.Core().V1().Secret(),
-		sc.Core.Core().V1().ConfigMap(),
+		sc.K8s,
 		sc.Core.Core().V1().Node()); err != nil {
 		return err
 	}
 
-	// apply SystemDefaultRegistry setting to Helm before starting controllers
+	// Apply SystemDefaultRegistry setting to Helm before starting controllers.
+	// Internally helm-controller defaults to latest tag, but we inject a immutable version at build time.
 	if config.ControlConfig.HelmJobImage != "" {
 		helmchart.DefaultJobImage = config.ControlConfig.HelmJobImage
 	} else if config.ControlConfig.SystemDefaultRegistry != "" {
 		helmchart.DefaultJobImage = config.ControlConfig.SystemDefaultRegistry + "/" + helmchart.DefaultJobImage
 	}
 
-	if !config.ControlConfig.DisableHelmController {
+	if sc.Helm != nil {
 		restConfig, err := util.GetRESTConfig(config.ControlConfig.Runtime.KubeConfigSupervisor)
 		if err != nil {
 			return err
@@ -247,7 +248,7 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 			metav1.NamespaceAll,
 			helmcommon.Name,
 			"cluster-admin",
-			strconv.Itoa(config.ControlConfig.APIServerPort),
+			strconv.Itoa(config.ControlConfig.HTTPSPort),
 			k8s,
 			apply,
 			util.BuildControllerEventRecorder(k8s, helmcommon.Name, metav1.NamespaceAll),
@@ -572,47 +573,30 @@ func setNodeLabelsAndAnnotations(ctx context.Context, nodes v1.NodeClient, confi
 	if config.DisableAgent || config.ControlConfig.DisableAPIServer {
 		return nil
 	}
-	for {
+
+	patcher := util.NewPatcher[*corev1.Node](nodes)
+	return wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
 		nodeName := os.Getenv("NODE_NAME")
 		if nodeName == "" {
 			logrus.Info("Waiting for control-plane node agent startup")
-			time.Sleep(1 * time.Second)
-			continue
+			return false, nil
 		}
-		node, err := nodes.Get(nodeName, metav1.GetOptions{})
-		if err != nil {
-			logrus.Infof("Waiting for control-plane node %s startup: %v", nodeName, err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-		if node.Labels == nil {
-			node.Labels = make(map[string]string)
-		}
-		v, ok := node.Labels[util.ControlPlaneRoleLabelKey]
-		if !ok || v != "true" {
-			node.Labels[util.ControlPlaneRoleLabelKey] = "true"
-			node.Labels[util.MasterRoleLabelKey] = "true"
+
+		patch := util.NewPatchList().Add("true", "metadata", "labels", util.ControlPlaneRoleLabelKey)
+		if _, err := patcher.Patch(ctx, patch, nodeName); err != nil {
+			logrus.Infof("Unable to set control-plane role label: %v", err)
+			return false, nil
 		}
 
 		if config.ControlConfig.EncryptSecrets {
-			if err = secretsencrypt.BootstrapEncryptionHashAnnotation(node, config.ControlConfig.Runtime); err != nil {
-				logrus.Infof("Unable to set encryption hash annotation %s", err.Error())
-				break
+			if err := secretsencrypt.BootstrapEncryptionHashAnnotation(ctx, config.ControlConfig.Runtime, nodeName); err != nil {
+				logrus.Infof("Unable to set encryption hash annotation %v", err)
+				return false, nil
 			}
 		}
-
-		_, err = nodes.Update(node)
-		if err == nil {
-			logrus.Infof("Labels and annotations have been set successfully on node: %s", nodeName)
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
-	}
-	return nil
+		logrus.Infof("Labels and annotations have been set successfully on node: %s", nodeName)
+		return true, nil
+	})
 }
 
 func setClusterDNSConfig(ctx context.Context, config *Config, configMap v1.ConfigMapClient) error {

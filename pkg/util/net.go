@@ -11,7 +11,6 @@ import (
 
 	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
 	apinet "k8s.io/apimachinery/pkg/util/net"
 	netutils "k8s.io/utils/net"
 )
@@ -137,7 +136,7 @@ func JoinIP6Nets(elems []*net.IPNet) string {
 // GetHostnameAndIPs takes a node name and list of IPs, usually from CLI args.
 // If set, these are used to return the node's name and addresses. If not set,
 // the system hostname and primary interface addresses are returned instead.
-func GetHostnameAndIPs(name string, nodeIPs cli.StringSlice) (string, []net.IP, error) {
+func GetHostnameAndIPs(name string, nodeIPs []string) (string, []net.IP, error) {
 	ips := []net.IP{}
 	if len(nodeIPs) == 0 {
 		hostIP, err := apinet.ChooseHostInterface()
@@ -177,7 +176,7 @@ func GetHostnameAndIPs(name string, nodeIPs cli.StringSlice) (string, []net.IP, 
 
 // ParseStringSliceToIPs converts slice of strings that in turn can be lists of comma separated unparsed IP addresses
 // into a single slice of net.IP, it returns error if at any point parsing failed
-func ParseStringSliceToIPs(s cli.StringSlice) ([]net.IP, error) {
+func ParseStringSliceToIPs(s []string) ([]net.IP, error) {
 	var ips []net.IP
 	for _, unparsedIP := range s {
 		for _, v := range strings.Split(unparsedIP, ",") {
@@ -194,7 +193,7 @@ func ParseStringSliceToIPs(s cli.StringSlice) ([]net.IP, error) {
 
 // GetFirstValidIPString returns the first valid address from a list of IP address strings,
 // without preference for IP family. If no address are found, an empty string is returned.
-func GetFirstValidIPString(s cli.StringSlice) string {
+func GetFirstValidIPString(s []string) string {
 	for _, unparsedIP := range s {
 		for _, v := range strings.Split(unparsedIP, ",") {
 			if ip := net.ParseIP(v); ip != nil {
@@ -207,21 +206,12 @@ func GetFirstValidIPString(s cli.StringSlice) string {
 
 // GetFirstIP checks what is the IPFamily of the first item. Based on that, returns a set of values
 func GetDefaultAddresses(nodeIP net.IP) (string, string, string, error) {
-
 	if netutils.IsIPv4(nodeIP) {
-		ListenAddress := "0.0.0.0"
-		clusterCIDR := "10.42.0.0/16"
-		serviceCIDR := "10.43.0.0/16"
-
-		return ListenAddress, clusterCIDR, serviceCIDR, nil
+		return "0.0.0.0", "10.42.0.0/16", "10.43.0.0/16", nil
 	}
 
 	if netutils.IsIPv6(nodeIP) {
-		ListenAddress := "::"
-		clusterCIDR := "fd00:42::/56"
-		serviceCIDR := "fd00:43::/112"
-
-		return ListenAddress, clusterCIDR, serviceCIDR, nil
+		return "::", "fd00:42::/56", "fd00:43::/112", nil
 	}
 
 	return "", "", "", fmt.Errorf("ip: %v is not ipv4 or ipv6", nodeIP)
@@ -232,15 +222,15 @@ func GetDefaultAddresses(nodeIP net.IP) (string, string, string, error) {
 // if neither of IPv4 or IPv6 are found an error is raised.
 func GetFirstString(elems []string) (string, bool, error) {
 	ip, err := GetFirst4String(elems)
-	IPv6only := false
+	v6only := false
 	if err != nil {
 		ip, err = GetFirst6String(elems)
 		if err != nil {
 			return "", false, err
 		}
-		IPv6only = true
+		v6only = true
 	}
-	return ip, IPv6only, nil
+	return ip, v6only, nil
 }
 
 // IPToIPNet converts an IP to an IPNet, using a fully filled mask appropriate for the address family.
@@ -406,9 +396,9 @@ func (ml *multiListener) Accept() (net.Conn, error) {
 		if ok {
 			return res.conn, res.err
 		}
-		return nil, fmt.Errorf("connection channel closed")
+		return nil, errors.New("connection channel closed")
 	case <-ml.closing:
-		return nil, fmt.Errorf("listener closed")
+		return nil, errors.New("listener closed")
 	}
 }
 

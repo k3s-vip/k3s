@@ -9,11 +9,14 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/signals"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/rancher/wrangler/pkg/schemes"
 	"github.com/sirupsen/logrus"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	v1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -46,6 +49,27 @@ func GetAddresses(endpoint *v1.Endpoints) []string {
 		}
 		for _, address := range subset.Addresses {
 			serverAddresses = append(serverAddresses, net.JoinHostPort(address.IP, port))
+		}
+	}
+	return serverAddresses
+}
+
+func GetAddressesFromSlices(slices ...discoveryv1.EndpointSlice) []string {
+	serverAddresses := []string{}
+	for _, slice := range slices {
+		var port string
+		if len(slice.Ports) > 0 && slice.Ports[0].Port != nil {
+			port = strconv.Itoa(int(*slice.Ports[0].Port))
+		}
+		if port == "" {
+			port = "443"
+		}
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready {
+				for _, address := range endpoint.Addresses {
+					serverAddresses = append(serverAddresses, net.JoinHostPort(address, port))
+				}
+			}
 		}
 	}
 	return serverAddresses
@@ -97,7 +121,7 @@ func WaitForAPIServerReady(ctx context.Context, kubeconfigPath string, timeout t
 		return true, nil
 	})
 
-	if err != nil && !errors.Is(err, context.Canceled) {
+	if err != nil {
 		return merr.NewErrors(err, lastErr)
 	}
 
@@ -111,10 +135,11 @@ func APIServerReadyChan(ctx context.Context, kubeConfig string, timeout time.Dur
 	ready := make(chan struct{})
 
 	go func() {
-		defer close(ready)
 		if err := WaitForAPIServerReady(ctx, kubeConfig, timeout); err != nil {
-			logrus.Fatalf("Failed to wait for API server to become ready: %v", err)
+			signals.RequestShutdown(pkgerrors.WithMessage(err, "failed to wait for API server to become ready"))
+			return
 		}
+		close(ready)
 	}()
 
 	return ready
