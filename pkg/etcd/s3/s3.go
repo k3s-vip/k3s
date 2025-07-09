@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -24,16 +23,15 @@ import (
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/etcd/snapshot"
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	pkgerrors "github.com/pkg/errors"
 	"github.com/rancher/wrangler/pkg/generated/controllers/core"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/utils/lru"
 )
 
 var (
@@ -48,6 +46,7 @@ var defaultEtcdS3 = &config.EtcdS3{
 	Timeout: metav1.Duration{
 		Duration: 5 * time.Minute,
 	},
+	Retention: 5,
 }
 
 var (
@@ -64,7 +63,7 @@ type Controller struct {
 	tokenHash   string
 	nodeName    string
 	core        core.Interface
-	clientCache *lru.Cache
+	clientCache *util.Cache[*Client]
 }
 
 // Client holds state for a given configuration - a preconfigured minio client,
@@ -82,7 +81,7 @@ type Client struct {
 func Start(ctx context.Context, config *config.Control) (*Controller, error) {
 	once.Do(func() {
 		c := &Controller{
-			clientCache: lru.New(5),
+			clientCache: util.NewCache[*Client](5),
 			nodeName:    os.Getenv("NODE_NAME"),
 		}
 
@@ -100,13 +99,13 @@ func Start(ctx context.Context, config *config.Control) (*Controller, error) {
 				// cluster id hack: see https://groups.google.com/forum/#!msg/kubernetes-sig-architecture/mVGobfD4TpY/nkdbkX1iBwAJ
 				ns, err := c.core.V1().Namespace().Get(metav1.NamespaceSystem, metav1.GetOptions{})
 				if err != nil {
-					return false, pkgerrors.WithMessage(err, "failed to set S3 snapshot cluster ID")
+					return false, errors.WithMessage(err, "failed to set S3 snapshot cluster ID")
 				}
 				c.clusterID = string(ns.UID)
 
 				tokenHash, err := util.GetTokenHash(config)
 				if err != nil {
-					return false, pkgerrors.WithMessage(err, "failed to set S3 snapshot server token hash")
+					return false, errors.WithMessage(err, "failed to set S3 snapshot server token hash")
 				}
 				c.tokenHash = tokenHash
 
@@ -130,6 +129,8 @@ func (c *Controller) GetClient(ctx context.Context, etcdS3 *config.EtcdS3) (*Cli
 	// update ConfigSecret in defaults so that comparisons between current and default config
 	// ignore ConfigSecret when deciding if CLI configuration is present.
 	defaultEtcdS3.ConfigSecret = etcdS3.ConfigSecret
+	// also ignore retention, as it may have been defaulted from the etcd-snapshot-retention flag.
+	defaultEtcdS3.Retention = etcdS3.Retention
 
 	// If config is default, try to load config from secret, and fail if it cannot be retrieved or if the secret name is not set.
 	// If config is not default, and secret name is set, warn that the secret is being ignored
@@ -138,7 +139,7 @@ func (c *Controller) GetClient(ctx context.Context, etcdS3 *config.EtcdS3) (*Cli
 		if isDefault {
 			e, err := c.getConfigFromSecret(etcdS3.ConfigSecret)
 			if err != nil {
-				return nil, pkgerrors.WithMessagef(err, "failed to get config from etcd-s3-config-secret %q", etcdS3.ConfigSecret)
+				return nil, errors.WithMessagef(err, "failed to get config from etcd-s3-config-secret %q", etcdS3.ConfigSecret)
 			}
 			logrus.Infof("Using etcd s3 configuration from etcd-s3-config-secret %q", etcdS3.ConfigSecret)
 			etcdS3 = e
@@ -160,7 +161,7 @@ func (c *Controller) GetClient(ctx context.Context, etcdS3 *config.EtcdS3) (*Cli
 	// print the endpoint and bucket name to avoid leaking creds into the logs.
 	if client, ok := c.clientCache.Get(*etcdS3); ok {
 		logrus.Infof("Reusing cached S3 client for endpoint=%q bucket=%q folder=%q", scheme+etcdS3.Endpoint, etcdS3.Bucket, etcdS3.Folder)
-		return client.(*Client), nil
+		return client, nil
 	}
 	logrus.Infof("Attempting to create new S3 client for endpoint=%q bucket=%q folder=%q", scheme+etcdS3.Endpoint, etcdS3.Bucket, etcdS3.Folder)
 
@@ -197,10 +198,10 @@ func (c *Controller) GetClient(ctx context.Context, etcdS3 *config.EtcdS3) (*Cli
 		if etcdS3.Proxy != "none" {
 			u, err = url.Parse(etcdS3.Proxy)
 			if err != nil {
-				return nil, pkgerrors.WithMessage(err, "failed to parse etcd-s3-proxy value as URL")
+				return nil, errors.WithMessage(err, "failed to parse etcd-s3-proxy value as URL")
 			}
 			if u.Scheme == "" || u.Host == "" {
-				return nil, fmt.Errorf("proxy URL must include scheme and host")
+				return nil, errors.New("proxy URL must include scheme and host")
 			}
 		}
 		tr.Proxy = http.ProxyURL(u)
@@ -220,7 +221,7 @@ func (c *Controller) GetClient(ctx context.Context, etcdS3 *config.EtcdS3) (*Cli
 	})
 
 	if _, err := creds.Get(); err != nil {
-		return nil, pkgerrors.WithMessage(err, "failed to get credentials")
+		return nil, errors.WithMessage(err, "failed to get credentials")
 	}
 
 	opt := minio.Options{
@@ -228,7 +229,7 @@ func (c *Controller) GetClient(ctx context.Context, etcdS3 *config.EtcdS3) (*Cli
 		Secure:       !etcdS3.Insecure,
 		Region:       etcdS3.Region,
 		Transport:    tr,
-		BucketLookup: bucketLookupType(etcdS3.Endpoint),
+		BucketLookup: bucketLookupType(etcdS3.Endpoint, etcdS3.BucketLookup),
 	}
 	mc, err := minio.New(etcdS3.Endpoint, &opt)
 	if err != nil {
@@ -242,7 +243,7 @@ func (c *Controller) GetClient(ctx context.Context, etcdS3 *config.EtcdS3) (*Cli
 
 	exists, err := mc.BucketExists(ctx, etcdS3.Bucket)
 	if err != nil {
-		return nil, pkgerrors.WithMessagef(err, "failed to test for existence of bucket %s", etcdS3.Bucket)
+		return nil, errors.WithMessagef(err, "failed to test for existence of bucket %s", etcdS3.Bucket)
 	}
 	if !exists {
 		return nil, fmt.Errorf("bucket %s does not exist", etcdS3.Bucket)
@@ -386,13 +387,13 @@ func (c *Client) downloadSnapshotMetadata(ctx context.Context, key, file string)
 
 // SnapshotRetention prunes snapshots in the configured S3 compatible backend for this specific node.
 // Returns a list of pruned snapshot names.
-func (c *Client) SnapshotRetention(ctx context.Context, retention int, prefix string) ([]string, error) {
-	if retention < 1 {
+func (c *Client) SnapshotRetention(ctx context.Context, prefix string) ([]string, error) {
+	if c.etcdS3.Retention < 1 {
 		return nil, nil
 	}
 
 	prefix = path.Join(c.etcdS3.Folder, prefix)
-	logrus.Infof("Applying snapshot retention=%d to snapshots stored in s3://%s/%s", retention, c.etcdS3.Bucket, prefix)
+	logrus.Infof("Applying snapshot retention=%d to snapshots stored in s3://%s/%s", c.etcdS3.Retention, c.etcdS3.Bucket, prefix)
 
 	var snapshotFiles []minio.ObjectInfo
 
@@ -416,7 +417,7 @@ func (c *Client) SnapshotRetention(ctx context.Context, retention int, prefix st
 		snapshotFiles = append(snapshotFiles, info)
 	}
 
-	if len(snapshotFiles) <= retention {
+	if len(snapshotFiles) <= c.etcdS3.Retention {
 		return nil, nil
 	}
 
@@ -426,7 +427,7 @@ func (c *Client) SnapshotRetention(ctx context.Context, retention int, prefix st
 	})
 
 	deleted := []string{}
-	for _, df := range snapshotFiles[retention:] {
+	for _, df := range snapshotFiles[c.etcdS3.Retention:] {
 		logrus.Infof("Removing S3 snapshot: s3://%s/%s", c.etcdS3.Bucket, df.Key)
 
 		key := path.Base(df.Key)
@@ -586,7 +587,14 @@ func loadEndpointCAs(etcdS3EndpointCA string) (*tls.Config, error) {
 	return nil, errors.New("no certificates loaded from etcd-s3-endpoint-ca")
 }
 
-func bucketLookupType(endpoint string) minio.BucketLookupType {
+func bucketLookupType(endpoint, lookupType string) minio.BucketLookupType {
+	switch strings.ToLower(lookupType) {
+	case "dns":
+		return minio.BucketLookupDNS
+	case "path":
+		return minio.BucketLookupPath
+	}
+
 	if strings.Contains(endpoint, "aliyun") { // backwards compatible with RKE1
 		return minio.BucketLookupDNS
 	}

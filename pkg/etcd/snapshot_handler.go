@@ -3,7 +3,6 @@ package etcd
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 
@@ -11,8 +10,9 @@ import (
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/util"
-	pkgerrors "github.com/pkg/errors"
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/sirupsen/logrus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 type SnapshotOperation string
@@ -70,7 +70,7 @@ func (e *ETCD) snapshotHandler() http.Handler {
 func (e *ETCD) handleList(rw http.ResponseWriter, req *http.Request) error {
 	if e.config.EtcdS3 != nil {
 		if _, err := e.getS3Client(req.Context()); err != nil {
-			err = pkgerrors.WithMessage(err, "failed to initialize S3 client")
+			err = errors.WithMessage(err, "failed to initialize S3 client")
 			util.SendError(err, rw, req, http.StatusBadRequest)
 			return nil
 		}
@@ -87,7 +87,7 @@ func (e *ETCD) handleList(rw http.ResponseWriter, req *http.Request) error {
 func (e *ETCD) handleSave(rw http.ResponseWriter, req *http.Request) error {
 	if e.config.EtcdS3 != nil {
 		if _, err := e.getS3Client(req.Context()); err != nil {
-			err = pkgerrors.WithMessage(err, "failed to initialize S3 client")
+			err = errors.WithMessage(err, "failed to initialize S3 client")
 			util.SendError(err, rw, req, http.StatusBadRequest)
 			return nil
 		}
@@ -104,7 +104,7 @@ func (e *ETCD) handleSave(rw http.ResponseWriter, req *http.Request) error {
 func (e *ETCD) handlePrune(rw http.ResponseWriter, req *http.Request) error {
 	if e.config.EtcdS3 != nil {
 		if _, err := e.getS3Client(req.Context()); err != nil {
-			err = pkgerrors.WithMessage(err, "failed to initialize S3 client")
+			err = errors.WithMessage(err, "failed to initialize S3 client")
 			util.SendError(err, rw, req, http.StatusBadRequest)
 			return nil
 		}
@@ -121,7 +121,7 @@ func (e *ETCD) handlePrune(rw http.ResponseWriter, req *http.Request) error {
 func (e *ETCD) handleDelete(rw http.ResponseWriter, req *http.Request, snapshots []string) error {
 	if e.config.EtcdS3 != nil {
 		if _, err := e.getS3Client(req.Context()); err != nil {
-			err = pkgerrors.WithMessage(err, "failed to initialize S3 client")
+			err = errors.WithMessage(err, "failed to initialize S3 client")
 			util.SendError(err, rw, req, http.StatusBadRequest)
 			return nil
 		}
@@ -136,7 +136,7 @@ func (e *ETCD) handleDelete(rw http.ResponseWriter, req *http.Request, snapshots
 }
 
 func (e *ETCD) handleInvalid(rw http.ResponseWriter, req *http.Request) error {
-	util.SendErrorWithID(fmt.Errorf("invalid snapshot operation"), "etcd-snapshot", rw, req, http.StatusBadRequest)
+	util.SendErrorWithID(errors.New("invalid snapshot operation"), "etcd-snapshot", rw, req, http.StatusBadRequest)
 	return nil
 }
 
@@ -159,7 +159,6 @@ func (e *ETCD) withRequest(sr *SnapshotRequest) *ETCD {
 		name:       e.name,
 		address:    e.address,
 		cron:       e.cron,
-		cancel:     e.cancel,
 		snapshotMu: e.snapshotMu,
 	}
 	if len(sr.Name) > 0 {
@@ -180,7 +179,7 @@ func (e *ETCD) withRequest(sr *SnapshotRequest) *ETCD {
 // getSnapshotRequest unmarshalls the snapshot operation request from a client.
 func getSnapshotRequest(req *http.Request) (*SnapshotRequest, error) {
 	if req.Method != http.MethodPost {
-		return nil, http.ErrNotSupported
+		return nil, apierrors.NewMethodNotSupported(k3s.Resource("snapshot"), req.Method)
 	}
 	sr := &SnapshotRequest{}
 	b, err := io.ReadAll(req.Body)
