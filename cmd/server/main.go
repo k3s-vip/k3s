@@ -24,7 +24,9 @@ import (
 	kubectl2 "github.com/k3s-io/k3s/pkg/kubectl"
 	crictl2 "github.com/kubernetes-sigs/cri-tools/cmd/crictl"
 	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
+
+	_ "github.com/k3s-io/k3s/pkg/executor/embed"
 )
 
 func init() {
@@ -43,7 +45,8 @@ func main() {
 	os.Args[0] = cmd
 
 	app := cmds.NewApp()
-	app.Commands = []cli.Command{
+	app.DisableSliceFlagSeparator = true
+	app.Commands = []*cli.Command{
 		cmds.NewServerCommand(server.Run),
 		cmds.NewAgentCommand(agent.Run),
 		cmds.NewKubectlCommand(kubectl.Run),
@@ -76,10 +79,13 @@ func main() {
 			cert.Rotate,
 			cert.RotateCA,
 		),
-		cmds.NewCompletionCommand(completion.Run),
+		cmds.NewCompletionCommand(
+			completion.Bash,
+			completion.Zsh,
+		),
 	}
 
 	if err := app.Run(configfilearg.MustParse(os.Args)); err != nil && !errors.Is(err, context.Canceled) {
-		logrus.Fatal(err)
+		logrus.Fatalf("Error: %v", err)
 	}
 }
