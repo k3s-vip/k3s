@@ -23,6 +23,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/etcd/s3"
 	"github.com/k3s-io/k3s/pkg/etcd/snapshot"
+	"github.com/k3s-io/k3s/pkg/etcd/snapshotmetrics"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/metrics"
 	"github.com/k3s-io/k3s/pkg/version"
@@ -36,7 +37,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/pager"
 	"k8s.io/client-go/util/retry"
@@ -169,12 +169,16 @@ func (e *ETCD) decompressSnapshot(snapshotDir, snapshotFile string) (string, err
 		if err != nil {
 			return "", err
 		}
+
+		//revive:disable-next-line:defer
 		defer decompressed.Close()
 
 		ss, err := sf.Open()
 		if err != nil {
 			return "", err
 		}
+
+		//revive:disable-next-line:defer
 		defer ss.Close()
 
 		if _, err := io.Copy(decompressed, ss); err != nil {
@@ -205,7 +209,7 @@ func (e *ETCD) Snapshot(ctx context.Context) (*managed.SnapshotResult, error) {
 // metrics do not overlap.
 func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr error) {
 	snapshotStart := time.Now()
-	defer metrics.ObserveWithStatus(snapshotSaveCount, snapshotStart, rerr)
+	defer metrics.ObserveWithStatus(snapshotmetrics.SaveCount, snapshotStart, rerr)
 
 	if !e.snapshotMu.TryLock() {
 		return nil, errors.New("snapshot save already in progress")
@@ -235,6 +239,7 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 		logrus.Warnf("Unable to take snapshot: not supported for learner")
 		return nil, nil
 	}
+	e.defragment(ctx)
 
 	snapshotDir, err := snapshotDir(e.config, true)
 	if err != nil {
@@ -260,8 +265,8 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 	var sf *snapshot.File
 
 	saveStart := time.Now()
-	err = snapshotv3.Save(ctx, e.client.GetLogger(), *cfg, snapshotPath)
-	metrics.ObserveWithStatus(snapshotSaveLocalCount, saveStart, err)
+	_, err = snapshotv3.SaveWithVersion(ctx, e.client.GetLogger(), *cfg, snapshotPath)
+	metrics.ObserveWithStatus(snapshotmetrics.SaveLocalCount, saveStart, err)
 
 	if err != nil {
 		sf = &snapshot.File{
@@ -343,7 +348,7 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 			if s3client, err := e.getS3Client(ctx); err != nil {
 				logrus.Warnf("Unable to initialize S3 client: %v", err)
 				if !errors.Is(err, s3.ErrNoConfigSecret) {
-					metrics.ObserveWithStatus(snapshotSaveS3Count, s3Start, err)
+					metrics.ObserveWithStatus(snapshotmetrics.SaveS3Count, s3Start, err)
 					err = pkgerrors.WithMessage(err, "failed to initialize S3 client")
 					sf = &snapshot.File{
 						Name:     f.Name(),
@@ -363,7 +368,7 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 				// upload will return a snapshot.File even on error - if there was an
 				// error, it will be reflected in the status and message.
 				sf, err = s3client.Upload(ctx, snapshotPath, extraMetadata, now)
-				metrics.ObserveWithStatus(snapshotSaveS3Count, s3Start, err)
+				metrics.ObserveWithStatus(snapshotmetrics.SaveS3Count, s3Start, err)
 				if err != nil {
 					logrus.Errorf("Error received during snapshot upload to S3: %s", err)
 				} else {
@@ -373,7 +378,7 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 				// Attempt to apply retention even if the upload failed; failure may be due to bucket
 				// being full or some other condition that retention policy would resolve.
 				// Snapshot retention may prune some files before returning an error. Failing to prune is not fatal.
-				deleted, err := s3client.SnapshotRetention(ctx, e.config.EtcdSnapshotRetention, e.config.EtcdSnapshotName)
+				deleted, err := s3client.SnapshotRetention(ctx, e.config.EtcdSnapshotName)
 				res.Deleted = append(res.Deleted, deleted...)
 				if err != nil {
 					logrus.Warnf("Failed to apply s3 snapshot retention policy: %v", err)
@@ -482,7 +487,7 @@ func (e *ETCD) PruneSnapshots(ctx context.Context) (*managed.SnapshotResult, err
 		if s3client, err := e.getS3Client(ctx); err != nil {
 			logrus.Warnf("Unable to initialize S3 client: %v", err)
 		} else {
-			deleted, err := s3client.SnapshotRetention(ctx, e.config.EtcdSnapshotRetention, e.config.EtcdSnapshotName)
+			deleted, err := s3client.SnapshotRetention(ctx, e.config.EtcdSnapshotName)
 			if err != nil {
 				logrus.Errorf("Error applying S3 snapshot retention policy: %v", err)
 			}
@@ -684,7 +689,7 @@ func (e *ETCD) ReconcileSnapshotData(ctx context.Context) error {
 // the provided SnapshotResult are deleted, even if they are within a retention window.
 func (e *ETCD) reconcileSnapshotData(ctx context.Context, res *managed.SnapshotResult) (rerr error) {
 	reconcileStart := time.Now()
-	defer metrics.ObserveWithStatus(snapshotReconcileCount, reconcileStart, rerr)
+	defer metrics.ObserveWithStatus(snapshotmetrics.ReconcileCount, reconcileStart, rerr)
 
 	// make sure the core.Factory is initialized. There can
 	// be a race between this core code startup.
@@ -698,7 +703,7 @@ func (e *ETCD) reconcileSnapshotData(ctx context.Context, res *managed.SnapshotR
 	// Get snapshots from local filesystem
 	localStart := time.Now()
 	snapshotFiles, err := e.listLocalSnapshots()
-	metrics.ObserveWithStatus(snapshotReconcileLocalCount, localStart, err)
+	metrics.ObserveWithStatus(snapshotmetrics.ReconcileLocalCount, localStart, err)
 	if err != nil {
 		return err
 	}
@@ -711,12 +716,12 @@ func (e *ETCD) reconcileSnapshotData(ctx context.Context, res *managed.SnapshotR
 		if s3client, err := e.getS3Client(ctx); err != nil {
 			logrus.Warnf("Unable to initialize S3 client: %v", err)
 			if !errors.Is(err, s3.ErrNoConfigSecret) {
-				metrics.ObserveWithStatus(snapshotReconcileS3Count, s3Start, err)
+				metrics.ObserveWithStatus(snapshotmetrics.ReconcileS3Count, s3Start, err)
 				return pkgerrors.WithMessage(err, "failed to initialize S3 client")
 			}
 		} else {
 			s3Snapshots, err := s3client.ListSnapshots(ctx)
-			metrics.ObserveWithStatus(snapshotReconcileS3Count, s3Start, err)
+			metrics.ObserveWithStatus(snapshotmetrics.ReconcileS3Count, s3Start, err)
 			if err != nil {
 				logrus.Errorf("Error retrieving S3 snapshots for reconciliation: %v", err)
 			} else {
@@ -871,25 +876,12 @@ func (e *ETCD) reconcileSnapshotData(ctx context.Context, res *managed.SnapshotR
 	}
 
 	// Update our Node object to note the timestamp of the snapshot storages that have been reconciled
-	patch := []map[string]string{
-		{
-			"op":    "add",
-			"value": now.Format(time.RFC3339),
-			"path":  "/metadata/annotations/" + strings.ReplaceAll(annotationLocalReconciled, "/", "~1"),
-		},
-	}
+	patch := util.NewPatchList().Add(now.Format(time.RFC3339), "metadata", "annotations", annotationLocalReconciled)
+	patcher := util.NewPatcher[*v1.Node](nodes)
 	if e.config.EtcdS3 != nil {
-		patch = append(patch, map[string]string{
-			"op":    "add",
-			"value": now.Format(time.RFC3339),
-			"path":  "/metadata/annotations/" + strings.ReplaceAll(annotationS3Reconciled, "/", "~1"),
-		})
+		patch.Add(now.Format(time.RFC3339), "metadata", "annotations", annotationS3Reconciled)
 	}
-	b, err := json.Marshal(patch)
-	if err != nil {
-		return err
-	}
-	_, err = nodes.Patch(nodeNames[0], types.JSONPatchType, b)
+	_, err = patcher.Patch(ctx, patch, nodeNames[0])
 	return err
 }
 
