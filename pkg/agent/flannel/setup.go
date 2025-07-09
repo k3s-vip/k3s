@@ -5,13 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 
 	agentutil "github.com/k3s-io/k3s/pkg/agent/util"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -19,10 +20,9 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
-	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/kubernetes"
+	toolscache "k8s.io/client-go/tools/cache"
 	toolswatch "k8s.io/client-go/tools/watch"
 	utilsnet "k8s.io/utils/net"
 )
@@ -49,13 +49,19 @@ const (
 
 	wireguardNativeBackend = `{
 	"Type": "wireguard",
-	"PersistentKeepaliveInterval": %PersistentKeepaliveInterval%,
-	"Mode": "%Mode%"
+	"PersistentKeepaliveInterval": 25
 }`
 
 	emptyIPv6Network = "::/0"
+)
 
-	ipv4 = iota
+type netMode int
+
+func (nm netMode) IPv4Enabled() bool { return nm&ipv4 != 0 }
+func (nm netMode) IPv6Enabled() bool { return nm&ipv6 != 0 }
+
+const (
+	ipv4 netMode = 1 << iota
 	ipv6
 )
 
@@ -67,7 +73,7 @@ func Prepare(ctx context.Context, nodeConfig *config.Node) error {
 	return createFlannelConf(nodeConfig)
 }
 
-func Run(ctx context.Context, nodeConfig *config.Node) error {
+func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error {
 	logrus.Infof("Starting flannel with backend %s", nodeConfig.FlannelBackend)
 
 	kubeConfig := nodeConfig.AgentConfig.KubeConfigKubelet
@@ -89,39 +95,28 @@ func Run(ctx context.Context, nodeConfig *config.Node) error {
 		return err
 	}
 
-	if err := waitForPodCIDR(ctx, nodeConfig.AgentConfig.NodeName, coreClient.CoreV1().Nodes()); err != nil {
+	if err := waitForPodCIDR(ctx, nodeConfig.AgentConfig.NodeName, coreClient); err != nil {
 		return pkgerrors.WithMessage(err, "flannel failed to wait for PodCIDR assignment")
 	}
 
-	netMode, err := findNetMode(nodeConfig.AgentConfig.ClusterCIDRs)
+	nm, err := findNetMode(nodeConfig.AgentConfig.ClusterCIDRs)
 	if err != nil {
 		return pkgerrors.WithMessage(err, "failed to check netMode for flannel")
 	}
 	go func() {
-		err := flannel(ctx, nodeConfig.FlannelIface, nodeConfig.FlannelConfFile, kubeConfig, nodeConfig.FlannelIPv6Masq, netMode)
+		err := flannel(ctx, wg, nodeConfig.FlannelIface, nodeConfig.FlannelConfFile, kubeConfig, nodeConfig.FlannelIPv6Masq, nm)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			logrus.Errorf("flannel exited: %v", err)
-			os.Exit(1)
+			signals.RequestShutdown(pkgerrors.WithMessage(err, "flannel exited"))
 		}
-		os.Exit(0)
+		signals.RequestShutdown(nil)
 	}()
 
 	return nil
 }
 
 // waitForPodCIDR watches nodes with this node's name, and returns when the PodCIDR has been set.
-func waitForPodCIDR(ctx context.Context, nodeName string, nodes typedcorev1.NodeInterface) error {
-	fieldSelector := fields.Set{metav1.ObjectNameField: nodeName}.String()
-	lw := &cache.ListWatch{
-		ListFunc: func(options metav1.ListOptions) (object runtime.Object, e error) {
-			options.FieldSelector = fieldSelector
-			return nodes.List(ctx, options)
-		},
-		WatchFunc: func(options metav1.ListOptions) (i watch.Interface, e error) {
-			options.FieldSelector = fieldSelector
-			return nodes.Watch(ctx, options)
-		},
-	}
+func waitForPodCIDR(ctx context.Context, nodeName string, coreClient kubernetes.Interface) error {
+	lw := toolscache.NewListWatchFromClient(coreClient.CoreV1().RESTClient(), "nodes", metav1.NamespaceNone, fields.OneTermEqualSelector(metav1.ObjectNameField, nodeName))
 	condition := func(ev watch.Event) (bool, error) {
 		if n, ok := ev.Object.(*v1.Node); ok {
 			return n.Spec.PodCIDR != "", nil
@@ -165,7 +160,6 @@ func createCNIConf(dir string, nodeConfig *config.Node) error {
 }
 
 func createFlannelConf(nodeConfig *config.Node) error {
-	var ipv4Enabled string
 	logrus.Debugf("Creating the flannel configuration for backend %s in file %s", nodeConfig.FlannelBackend, nodeConfig.FlannelConfFile)
 	if nodeConfig.FlannelConfFile == "" {
 		return errors.New("Flannel configuration not defined")
@@ -174,44 +168,43 @@ func createFlannelConf(nodeConfig *config.Node) error {
 		logrus.Infof("Using custom flannel conf defined at %s", nodeConfig.FlannelConfFile)
 		return nil
 	}
-	netMode, err := findNetMode(nodeConfig.AgentConfig.ClusterCIDRs)
+	nm, err := findNetMode(nodeConfig.AgentConfig.ClusterCIDRs)
 	if err != nil {
 		logrus.Fatalf("Flannel error checking netMode: %v", err)
 		return err
 	}
-	if netMode == ipv4 || netMode == (ipv4+ipv6) {
-		ipv4Enabled = "true"
+	confJSON := flannelConf
+	if nm.IPv4Enabled() {
+		confJSON = strings.ReplaceAll(confJSON, "%IPV4_ENABLED%", "true")
+		if nm.IPv6Enabled() {
+			for _, cidr := range nodeConfig.AgentConfig.ClusterCIDRs {
+				if utilsnet.IsIPv4(cidr.IP) {
+					confJSON = strings.ReplaceAll(confJSON, "%CIDR%", cidr.String())
+					break
+				}
+			}
+		} else {
+			confJSON = strings.ReplaceAll(confJSON, "%CIDR%", nodeConfig.AgentConfig.ClusterCIDR.String())
+		}
 	} else {
-		ipv4Enabled = "false"
+		confJSON = strings.ReplaceAll(confJSON, "%IPV4_ENABLED%", "false")
+		confJSON = strings.ReplaceAll(confJSON, "%CIDR%", "0.0.0.0/0")
 	}
-	confJSON := strings.ReplaceAll(flannelConf, "%IPV4_ENABLED%", ipv4Enabled)
-	if netMode == ipv4 {
-		confJSON = strings.ReplaceAll(confJSON, "%CIDR%", nodeConfig.AgentConfig.ClusterCIDR.String())
+	if nm.IPv6Enabled() {
+		confJSON = strings.ReplaceAll(confJSON, "%IPV6_ENABLED%", "true")
+		for _, cidr := range nodeConfig.AgentConfig.ClusterCIDRs {
+			if utilsnet.IsIPv6(cidr.IP) {
+				// Only one ipv6 range available. This might change in future: https://github.com/kubernetes/enhancements/issues/2593
+				confJSON = strings.ReplaceAll(confJSON, "%CIDR_IPV6%", cidr.String())
+				break
+			}
+		}
+	} else {
 		confJSON = strings.ReplaceAll(confJSON, "%IPV6_ENABLED%", "false")
 		confJSON = strings.ReplaceAll(confJSON, "%CIDR_IPV6%", emptyIPv6Network)
-	} else if netMode == (ipv4 + ipv6) {
-		confJSON = strings.ReplaceAll(confJSON, "%IPV6_ENABLED%", "true")
-		for _, cidr := range nodeConfig.AgentConfig.ClusterCIDRs {
-			if utilsnet.IsIPv6(cidr.IP) {
-				// Only one ipv6 range available. This might change in future: https://github.com/kubernetes/enhancements/issues/2593
-				confJSON = strings.ReplaceAll(confJSON, "%CIDR_IPV6%", cidr.String())
-			} else {
-				confJSON = strings.ReplaceAll(confJSON, "%CIDR%", cidr.String())
-			}
-		}
-	} else {
-		confJSON = strings.ReplaceAll(confJSON, "%CIDR%", "0.0.0.0/0")
-		confJSON = strings.ReplaceAll(confJSON, "%IPV6_ENABLED%", "true")
-		for _, cidr := range nodeConfig.AgentConfig.ClusterCIDRs {
-			if utilsnet.IsIPv6(cidr.IP) {
-				// Only one ipv6 range available. This might change in future: https://github.com/kubernetes/enhancements/issues/2593
-				confJSON = strings.ReplaceAll(confJSON, "%CIDR_IPV6%", cidr.String())
-			}
-		}
 	}
 
 	var backendConf string
-	backendOptions := make(map[string]string)
 
 	// precheck and error out unsupported flannel backends.
 	switch nodeConfig.FlannelBackend {
@@ -229,29 +222,19 @@ func createFlannelConf(nodeConfig *config.Node) error {
 	case config.FlannelBackendHostGW:
 		backendConf = hostGWBackend
 	case config.FlannelBackendTailscale:
-		var routes string
-		switch netMode {
-		case ipv4:
-			routes = "$SUBNET"
-		case (ipv4 + ipv6):
-			routes = "$SUBNET,$IPV6SUBNET"
-		case ipv6:
-			routes = "$IPV6SUBNET"
-		default:
+		var routes []string
+		if nm.IPv4Enabled() {
+			routes = append(routes, "$SUBNET")
+		}
+		if nm.IPv6Enabled() {
+			routes = append(routes, "$IPV6SUBNET")
+		}
+		if len(routes) == 0 {
 			return fmt.Errorf("incorrect netMode for flannel tailscale backend")
 		}
-		backendConf = strings.ReplaceAll(tailscaledBackend, "%Routes%", routes)
+		backendConf = strings.ReplaceAll(tailscaledBackend, "%Routes%", strings.Join(routes, ","))
 	case config.FlannelBackendWireguardNative:
-		mode, ok := backendOptions["Mode"]
-		if !ok {
-			mode = "separate"
-		}
-		keepalive, ok := backendOptions["PersistentKeepaliveInterval"]
-		if !ok {
-			keepalive = "25"
-		}
-		backendConf = strings.ReplaceAll(wireguardNativeBackend, "%Mode%", mode)
-		backendConf = strings.ReplaceAll(backendConf, "%PersistentKeepaliveInterval%", keepalive)
+		backendConf = wireguardNativeBackend
 	default:
 		return fmt.Errorf("Cannot configure unknown flannel backend '%s'", nodeConfig.FlannelBackend)
 	}
@@ -262,13 +245,13 @@ func createFlannelConf(nodeConfig *config.Node) error {
 }
 
 // fundNetMode returns the mode (ipv4, ipv6 or dual-stack) in which flannel is operating
-func findNetMode(cidrs []*net.IPNet) (int, error) {
+func findNetMode(cidrs []*net.IPNet) (netMode, error) {
 	dualStack, err := utilsnet.IsDualStackCIDRs(cidrs)
 	if err != nil {
 		return 0, err
 	}
 	if dualStack {
-		return ipv4 + ipv6, nil
+		return ipv4 | ipv6, nil
 	}
 
 	for _, cidr := range cidrs {

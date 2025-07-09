@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/errdefs"
@@ -23,6 +22,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/agent/cri"
 	util2 "github.com/k3s-io/k3s/pkg/agent/util"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/natefinch/lumberjack"
 	pkgerrors "github.com/pkg/errors"
@@ -99,10 +99,9 @@ func Run(ctx context.Context, cfg *config.Node) error {
 		addDeathSig(cmd)
 		err := cmd.Run()
 		if err != nil && !errors.Is(err, context.Canceled) {
-			logrus.Errorf("containerd exited: %s", err)
-			os.Exit(1)
+			signals.RequestShutdown(pkgerrors.WithMessage(err, "containerd exited"))
 		}
-		os.Exit(0)
+		signals.RequestShutdown(nil)
 	}()
 
 	if err := cri.WaitForService(ctx, cfg.Containerd.Address, "containerd"); err != nil {
@@ -131,7 +130,6 @@ func PreloadImages(ctx context.Context, cfg *config.Node) error {
 		return err
 	}
 	defer criConn.Close()
-	imageClient := runtimeapi.NewImageServiceClient(criConn)
 
 	// Ensure that our images are imported into the correct namespace
 	ctx = namespaces.WithNamespace(ctx, constants.K8sContainerdNamespace)
@@ -146,44 +144,7 @@ func PreloadImages(ctx context.Context, cfg *config.Node) error {
 		return pkgerrors.WithMessage(err, "failed to clear pinned labels")
 	}
 
-	go watchImages(ctx, cfg)
-
-	// After setting the watcher, connections and everything, k3s will see if the images folder is already created
-	// if the folder its already created, it will load the images
-	fileInfo, err := os.Stat(cfg.Images)
-	if os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		logrus.Errorf("Unable to find images in %s: %v", cfg.Images, err)
-		return nil
-	}
-
-	if !fileInfo.IsDir() {
-		return nil
-	}
-
-	fileInfos, err := os.ReadDir(cfg.Images)
-	if err != nil {
-		logrus.Errorf("Unable to read images in %s: %v", cfg.Images, err)
-		return nil
-	}
-
-	for _, fileInfo := range fileInfos {
-		if fileInfo.IsDir() {
-			continue
-		}
-
-		start := time.Now()
-		filePath := filepath.Join(cfg.Images, fileInfo.Name())
-
-		if err := preloadFile(ctx, cfg, client, imageClient, filePath); err != nil {
-			logrus.Errorf("Error encountered while importing %s: %v", filePath, err)
-			continue
-		}
-		logrus.Infof("Imported images from %s in %s", filePath, time.Since(start))
-	}
-
-	return nil
+	return importAndWatchImages(ctx, cfg)
 }
 
 // preloadFile handles loading images from a single tarball or pre-pull image list.
