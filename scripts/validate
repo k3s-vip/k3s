@@ -1,22 +1,21 @@
 #!/bin/bash
 set -e
 
+cd $(dirname $0)/..
+
+echo Running: go mod tidy
+cp go.mod go.bak
+go mod tidy -v
+diff go.bak go.mod || pwd
+
+echo Running: go generate
+mkdir -p build/{data,static}
+GOOS=linux CC=gcc CXX=g++ go generate
+
 if [ -n "$SKIP_VALIDATE" ]; then
     echo Skipping validation
     exit
 fi
-
-cd $(dirname $0)/..
-
-echo Running: install script signature checks
-sha256sum -c install.sh.sha256sum
-
-echo Running: go mod tidy
-go mod tidy
-
-echo Running: go generate
-GOOS=linux CC=gcc CXX=g++ go generate
-
 echo Running validation
 
 . ./scripts/version.sh

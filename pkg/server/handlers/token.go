@@ -3,7 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -35,7 +35,7 @@ func getServerTokenRequest(req *http.Request) (TokenRotateRequest, error) {
 func TokenRequest(ctx context.Context, control *config.Control) http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPut {
-			util.SendError(fmt.Errorf("method not allowed"), resp, req, http.StatusMethodNotAllowed)
+			util.SendError(errors.New("method not allowed"), resp, req, http.StatusMethodNotAllowed)
 			return
 		}
 		var err error
@@ -71,18 +71,19 @@ func tokenRotate(ctx context.Context, control *config.Control, newToken string) 
 		return err
 	}
 
-	if err != nil {
-		return err
-	}
 	oldToken, found := passwd.Pass("server")
 	if !found {
-		return fmt.Errorf("server token not found")
+		return errors.New("server token not found")
 	}
 	if newToken == "" {
 		newToken, err = util.Random(16)
 		if err != nil {
 			return err
 		}
+	}
+
+	if newToken, err = util.NormalizeToken(newToken); err != nil {
+		return err
 	}
 
 	if err := passwd.EnsureUser("server", version.Program+":server", newToken); err != nil {

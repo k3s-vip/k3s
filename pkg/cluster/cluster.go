@@ -2,17 +2,23 @@ package cluster
 
 import (
 	"context"
+	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/cli/cmds"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/daemons/executor"
 	"github.com/k3s-io/k3s/pkg/etcd"
+	"github.com/k3s-io/k3s/pkg/metrics"
+	"github.com/k3s-io/k3s/pkg/signals"
+	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/kine/pkg/endpoint"
-	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilsnet "k8s.io/utils/net"
@@ -23,7 +29,7 @@ type Cluster struct {
 	config           *config.Control
 	managedDB        managed.Driver
 	joining          bool
-	storageStarted   bool
+	storageRunning   bool
 	saveBootstrap    bool
 	cnFilterFunc     func(...string) []string
 }
@@ -37,21 +43,23 @@ func (c *Cluster) ListenAndServe(ctx context.Context) error {
 
 // Start handles writing/reading bootstrap data. If embedded etcd is in use,
 // a secondary call to Cluster.save is made.
-func (c *Cluster) Start(ctx context.Context) error {
-	if c.config.DisableETCD || c.managedDB == nil {
-		// if etcd is disabled or we're using kine, perform a no-op start of etcd
-		// to close the etcd ready channel. When etcd is in use, this is handled by
-		// c.start() -> c.managedDB.Start() -> etcd.Start() -> executor.ETCD()
-		executor.ETCD(ctx, nil, nil, func(context.Context) error { return nil })
+func (c *Cluster) Start(ctx context.Context, wg *sync.WaitGroup) error {
+	// if etcd is disabled or we're using kine, perform a no-op start of etcd
+	// to close the etcd ready channel. When etcd is in use, this is handled by
+	// c.start() -> c.managedDB.Start() -> etcd.Start() -> executor.ETCD()
+	if c.config.DisableETCD {
+		return executor.ETCD(ctx, wg, nil, nil, func(ctx context.Context, _ bool) error { return c.managedDB.Test(ctx, false) })
 	}
 
-	if c.config.DisableETCD {
-		return nil
+	if c.managedDB == nil {
+		if err := executor.ETCD(ctx, wg, nil, nil, func(context.Context, bool) error { return nil }); err != nil {
+			return err
+		}
 	}
 
 	// start managed etcd database; when kine is in use this is a no-op.
-	if err := c.start(ctx); err != nil {
-		return pkgerrors.WithMessage(err, "start managed database")
+	if err := c.start(ctx, wg); err != nil {
+		return errors.WithMessage(err, "start managed database")
 	}
 
 	// set c.config.Datastore and c.config.Runtime.EtcdConfig with values
@@ -74,9 +82,10 @@ func (c *Cluster) Start(ctx context.Context) error {
 				select {
 				case <-executor.ETCDReadyChan():
 					// always save to managed etcd, to ensure that any file modified locally are in sync with the datastore.
-					// this will panic if multiple keys exist, to prevent nodes from running with different bootstrap data.
-					if err := Save(ctx, c.config, false); err != nil {
-						panic(err)
+					// this will fail if multiple keys exist, to prevent nodes from running with different bootstrap data.
+					if err := Save(ctx, c.config, false); err != nil && !errors.Is(err, context.Canceled) {
+						signals.RequestShutdown(errors.WithMessage(err, "failed to save bootstrap data"))
+						return
 					}
 
 					if !c.config.EtcdDisableSnapshots {
@@ -115,8 +124,13 @@ func (c *Cluster) startEtcdProxy(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defaultURL.Host = defaultURL.Hostname() + ":2379"
-	etcdProxy, err := etcd.NewETCDProxy(ctx, c.config.SupervisorPort, c.config.DataDir, defaultURL.String(), utilsnet.IsIPv6CIDR(c.config.ServiceIPRanges[0]))
+	_, nodeIPs, err := util.GetHostnameAndIPs(cmds.AgentConfig.NodeName, cmds.AgentConfig.NodeIP.Value())
+	if err != nil {
+		return errors.WithMessage(err, "failed to get node name and addresses")
+	}
+
+	defaultURL.Host = net.JoinHostPort(defaultURL.Hostname(), "2379")
+	etcdProxy, err := etcd.NewETCDProxy(ctx, c.config.SupervisorPort, c.config.DataDir, defaultURL.String(), utilsnet.IsIPv6(nodeIPs[0]))
 	if err != nil {
 		return err
 	}
@@ -130,7 +144,7 @@ func (c *Cluster) startEtcdProxy(ctx context.Context) error {
 		for i, c := range clientURLs {
 			u, err := url.Parse(c)
 			if err != nil {
-				return pkgerrors.WithMessage(err, "failed to parse etcd ClientURL")
+				return errors.WithMessage(err, "failed to parse etcd ClientURL")
 			}
 			clientURLs[i] = u.Host
 		}
@@ -156,22 +170,42 @@ func (c *Cluster) startEtcdProxy(ctx context.Context) error {
 // and unix domain socket listener if using an external database. In the case of an etcd
 // backend it just returns the user-provided etcd endpoints and tls config.
 func (c *Cluster) startStorage(ctx context.Context, bootstrap bool) error {
-	if c.storageStarted && !c.config.KineTLS {
+	if c.storageRunning {
 		return nil
 	}
-	c.storageStarted = true
+
+	// the datastore is started multiple times when TLS is enabled.
+	// ensure that storage is no longer marked as running after its context is cancelled.
+	go func() {
+		<-ctx.Done()
+		c.storageRunning = false
+	}()
+	c.storageRunning = true
+
+	if !c.config.KineTLS {
+		// if TLS is not enabled for kine, storage will only be started once,
+		// so go ahead and register metrics now
+		c.config.Datastore.MetricsRegisterer = metrics.DefaultRegisterer
+		// also set up kine peering (if enabled) without certs
+		c.setupKinePeering()
+	}
 
 	if !bootstrap {
-		// set the tls config for the kine storage
+		// only register metrics after boostrapping is done, to prevent
+		// multiple datastore metrics from being registered
+		c.config.Datastore.MetricsRegisterer = metrics.DefaultRegisterer
+		// set the tls config for the kine storage, once bootstrapped
 		c.config.Datastore.ServerTLSConfig.CAFile = c.config.Runtime.ETCDServerCA
 		c.config.Datastore.ServerTLSConfig.CertFile = c.config.Runtime.ServerETCDCert
 		c.config.Datastore.ServerTLSConfig.KeyFile = c.config.Runtime.ServerETCDKey
+		// also set up kine peering, now that we have certs to use.
+		c.setupKinePeering()
 	}
 
 	// start listening on the kine socket as an etcd endpoint, or return the external etcd endpoints
 	etcdConfig, err := endpoint.Listen(ctx, c.config.Datastore)
 	if err != nil {
-		return pkgerrors.WithMessage(err, "creating storage endpoint")
+		return errors.WithMessage(err, "creating storage endpoint")
 	}
 
 	// Persist the returned etcd configuration. We decide if we're doing leader election for embedded controllers
@@ -188,6 +222,19 @@ func (c *Cluster) startStorage(ctx context.Context, bootstrap bool) error {
 	}
 
 	return nil
+}
+
+func (c *Cluster) setupKinePeering() {
+	if strings.HasPrefix(c.config.Datastore.Endpoint, "t4://") {
+		address := c.config.BindAddressOrLoopback(true, true) + ":3380"
+		c.config.Datastore.PeerConfig.AdvertiseAddress = address
+		c.config.Datastore.PeerConfig.BindAddress = address
+		if c.config.KineTLS {
+			c.config.Datastore.BackendTLSConfig.CAFile = c.config.Runtime.ETCDPeerCA
+			c.config.Datastore.BackendTLSConfig.CertFile = c.config.Runtime.PeerServerClientETCDCert
+			c.config.Datastore.BackendTLSConfig.KeyFile = c.config.Runtime.PeerServerClientETCDKey
+		}
+	}
 }
 
 // New creates an initial cluster using the provided configuration.
