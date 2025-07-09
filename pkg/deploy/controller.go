@@ -10,7 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -19,10 +19,10 @@ import (
 	controllersv1 "github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io/v1"
 	"github.com/k3s-io/k3s/pkg/agent/util"
 	pkgutil "github.com/k3s-io/k3s/pkg/util"
-	pkgerrors "github.com/pkg/errors"
+	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/rancher/wrangler/pkg/apply"
 	"github.com/rancher/wrangler/pkg/kv"
-	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/rancher/wrangler/pkg/objectset"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
@@ -31,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	yamlDecoder "k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
@@ -82,9 +82,14 @@ type watcher struct {
 	discovery  discovery.DiscoveryInterface
 }
 
+type watchedFile struct {
+	os.FileInfo
+	removeOnDisable bool
+}
+
 // start calls listFiles at regular intervals to trigger application of manifests that have changed on disk.
 func (w *watcher) start(ctx context.Context, client kubernetes.Interface) {
-	w.recorder = pkgutil.BuildControllerEventRecorder(client, ControllerName, metav1.NamespaceSystem)
+	w.recorder = pkgutil.BuildControllerEventRecorder(logger.NewContext(ctx, ControllerName), client, ControllerName, metav1.NamespaceSystem)
 	force := true
 	for {
 		if err := w.listFiles(force); err == nil {
@@ -108,40 +113,14 @@ func (w *watcher) listFiles(force bool) error {
 			errs = append(errs, err)
 		}
 	}
-	return merr.NewErrors(errs...)
+	return errors.Join(errs...)
 }
 
 // listFilesIn recursively processes all files within a path, and checks them against the disable and skip lists. Files found that
 // are not on either list are loaded as Addons and applied to the cluster.
 func (w *watcher) listFilesIn(base string, force bool) error {
-	files := map[string]os.FileInfo{}
-	if err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		// Descend into symlinked directories, however, only top-level links are followed
-		if info.Mode()&os.ModeSymlink != 0 {
-			linkInfo, err := os.Stat(path)
-			if err != nil {
-				return err
-			}
-			if linkInfo.IsDir() {
-				evalPath, err := filepath.EvalSymlinks(path)
-				if err != nil {
-					return err
-				}
-				filepath.Walk(evalPath, func(path string, info os.FileInfo, err error) error {
-					if err != nil {
-						return err
-					}
-					files[path] = info
-					return nil
-				})
-			}
-		}
-		files[path] = info
-		return nil
-	}); err != nil {
+	files, err := walkFiles(base)
+	if err != nil {
 		return err
 	}
 
@@ -158,14 +137,17 @@ func (w *watcher) listFilesIn(base string, force bool) error {
 		keys[keyIndex] = path
 		keyIndex++
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	var errs []error
 	for _, path := range keys {
+		if files[path].IsDir() {
+			continue
+		}
 		// Disabled files are not just skipped, but actively deleted from the filesystem
 		if shouldDisableFile(base, path, w.disables) {
-			if err := w.delete(path); err != nil {
-				errs = append(errs, pkgerrors.WithMessagef(err, "failed to delete %s", path))
+			if err := w.delete(path, files[path].removeOnDisable); err != nil {
+				errs = append(errs, errors.WithMessagef(err, "failed to delete %s", path))
 			}
 			continue
 		}
@@ -178,13 +160,53 @@ func (w *watcher) listFilesIn(base string, force bool) error {
 			continue
 		}
 		if err := w.deploy(path, !force); err != nil {
-			errs = append(errs, pkgerrors.WithMessagef(err, "failed to process %s", path))
+			errs = append(errs, errors.WithMessagef(err, "failed to process %s", path))
 		} else {
 			w.modTime[path] = modTime
 		}
 	}
 
-	return merr.NewErrors(errs...)
+	return errors.Join(errs...)
+}
+
+func walkFiles(base string) (map[string]watchedFile, error) {
+	files := map[string]watchedFile{}
+	if err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// Descend into symlinked directories, however, only top-level links are followed.
+		// Keep the logical path for disable matching, but avoid unlinking backing files
+		// that are only reachable via a followed symlinked directory.
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkInfo, err := os.Stat(path)
+			if err != nil {
+				return err
+			}
+			if linkInfo.IsDir() {
+				evalPath, err := filepath.EvalSymlinks(path)
+				if err != nil {
+					return err
+				}
+				return filepath.Walk(evalPath, func(linkPath string, linkInfo os.FileInfo, err error) error {
+					if err != nil {
+						return err
+					}
+					rel, err := filepath.Rel(evalPath, linkPath)
+					if err != nil {
+						return err
+					}
+					files[filepath.Join(path, rel)] = watchedFile{FileInfo: linkInfo, removeOnDisable: false}
+					return nil
+				})
+			}
+		}
+		files[path] = watchedFile{FileInfo: info, removeOnDisable: true}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 // deploy loads yaml from a manifest on disk, creates an AddOn resource to track its application, and then applies
@@ -268,8 +290,8 @@ func (w *watcher) deploy(path string, compareChecksum bool) error {
 }
 
 // delete completely removes both a manifest, and any resources that it did or would have created. The manifest is
-// parsed, and any resources it specified are deleted. Finally, the file itself is removed from disk.
-func (w *watcher) delete(path string) error {
+// parsed, and any resources it specified are deleted. If requested, the file itself is then removed from disk.
+func (w *watcher) delete(path string, removeFile bool) error {
 	name := basename(path)
 	addon, err := w.getOrCreateAddon(name)
 	if err != nil {
@@ -303,19 +325,25 @@ func (w *watcher) delete(path string) error {
 		return err
 	}
 
-	// ensure that the addon is completely removed before deleting the objectSet,
-	// so return when err == nil, otherwise pods may get stuck terminating
-	w.recorder.Eventf(&addon, corev1.EventTypeNormal, "DeletingManifest", "Deleting manifest at %q", path)
-	if err := w.addons.Delete(addon.Namespace, addon.Name, &metav1.DeleteOptions{}); err == nil || !apierrors.IsNotFound(err) {
-		return err
-	}
-
-	// apply an empty set with owner & gvk data to delete
+	// Apply an empty set with owner & gvk data to delete
 	if err := w.apply.WithOwner(&addon).WithGVK(addonGVKs...).ApplyObjects(); err != nil {
 		return err
 	}
 
-	return os.Remove(path)
+	// Remove the addon file
+	if removeFile {
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+
+	// Delete the addon
+	w.recorder.Eventf(&addon, corev1.EventTypeNormal, "DeletingManifest", "Deleting manifest at %q", path)
+	if err := w.addons.Delete(addon.Namespace, addon.Name, &metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	return nil
 }
 
 // getOrCreateAddon attempts to get an Addon by name from the addon namespace, and creates a new one
@@ -415,7 +443,7 @@ func isEmptyYaml(yaml []byte) bool {
 // yamlToObjects returns an object slice yielded from documents in a chunk of YAML
 func yamlToObjects(in io.Reader) ([]runtime.Object, error) {
 	var result []runtime.Object
-	reader := yamlDecoder.NewYAMLReader(bufio.NewReaderSize(in, 4096))
+	reader := yaml.NewYAMLReader(bufio.NewReaderSize(in, 4096))
 	for {
 		raw, err := reader.Read()
 		if err == io.EOF {
@@ -440,7 +468,7 @@ func yamlToObjects(in io.Reader) ([]runtime.Object, error) {
 
 // Returns one or more objects from a single YAML document
 func toObjects(bytes []byte) ([]runtime.Object, error) {
-	bytes, err := yamlDecoder.ToJSON(bytes)
+	bytes, err := yaml.ToJSON(bytes)
 	if err != nil {
 		return nil, err
 	}
@@ -453,8 +481,8 @@ func toObjects(bytes []byte) ([]runtime.Object, error) {
 	if l, ok := obj.(*unstructured.UnstructuredList); ok {
 		var result []runtime.Object
 		for _, obj := range l.Items {
-			copy := obj
-			result = append(result, &copy)
+			newObj := obj
+			result = append(result, &newObj)
 		}
 		return result, nil
 	}
