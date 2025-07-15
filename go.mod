@@ -97,7 +97,6 @@ require (
 	github.com/erikdubbelboer/gspt v0.0.0-20190125194910-e68493906b83
 	github.com/flannel-io/flannel v0.27.0
 	github.com/fsnotify/fsnotify v1.7.0
-	github.com/go-bindata/go-bindata v3.1.2+incompatible
 	github.com/go-logr/logr v1.4.2
 	github.com/go-logr/stdr v1.2.3-0.20220714215716-96bad1d688c5
 	github.com/go-test/deep v1.0.7
@@ -111,7 +110,6 @@ require (
 	github.com/ipfs/go-log/v2 v2.5.1
 	github.com/joho/godotenv v1.5.1
 	github.com/json-iterator/go v1.1.12
-	github.com/k3s-io/api v0.1.2
 	github.com/k3s-io/helm-controller v0.16.13
 	github.com/k3s-io/kine v0.13.17
 	github.com/klauspost/compress v1.18.0
