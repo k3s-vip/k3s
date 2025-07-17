@@ -112,8 +112,7 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node) error {
 	localAddr := net.JoinHostPort(c.InternalAddress, c.RegistryPort)
 	// distribute images for all configured mirrors. there doesn't need to be a
 	// configured endpoint, just having a key for the registry will do.
-	urls := []url.URL{}
-	registries := []string{}
+	var registries, urls []string
 	for host := range nodeConfig.AgentConfig.Registry.Mirrors {
 		if host == localAddr {
 			continue
@@ -121,7 +120,7 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node) error {
 		if u, err := url.Parse("https://" + host); err != nil || docker.IsLocalhost(host) {
 			logrus.Errorf("Distributed registry mirror skipping invalid registry: %s", host)
 		} else {
-			urls = append(urls, *u)
+			urls = append(urls, u.String())
 			registries = append(registries, host)
 		}
 	}
@@ -145,7 +144,7 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node) error {
 	ipfslog.SetAllLoggers(level)
 
 	// Get containerd client
-	ociOpts := []oci.Option{oci.WithContentPath(filepath.Join(nodeConfig.Containerd.Root, "io.containerd.content.v1.content"))}
+	ociOpts := []oci.ContainerdOption{oci.WithContentPath(filepath.Join(nodeConfig.Containerd.Root, "io.containerd.content.v1.content"))}
 	ociClient, err := oci.NewContainerd(nodeConfig.Containerd.Address, registryNamespace, nodeConfig.Containerd.Registry, urls, ociOpts...)
 	if err != nil {
 		return pkgerrors.WithMessage(err, "failed to create OCI client")
