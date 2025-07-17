@@ -14,6 +14,7 @@ import (
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/apps"
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/batch"
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/core"
+	"github.com/rancher/wrangler/v3/pkg/generated/controllers/discovery"
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/rbac"
 	"github.com/rancher/wrangler/v3/pkg/start"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -25,14 +26,15 @@ import (
 )
 
 type Context struct {
-	K3s   *k3s.Factory
-	Helm  *helm.Factory
-	Batch *batch.Factory
-	Apps  *apps.Factory
-	Auth  *rbac.Factory
-	Core  *core.Factory
-	K8s   kubernetes.Interface
-	Event record.EventRecorder
+	K3s       *k3s.Factory
+	Helm      *helm.Factory
+	Batch     *batch.Factory
+	Apps      *apps.Factory
+	Auth      *rbac.Factory
+	Core      *core.Factory
+	Discovery *discovery.Factory
+	K8s       kubernetes.Interface
+	Event     record.EventRecorder
 }
 
 func (c *Context) Start(ctx context.Context) error {
@@ -64,14 +66,15 @@ func NewContext(ctx context.Context, config *Config, forServer bool) (*Context, 
 	}
 
 	return &Context{
-		K3s:   k3s.NewFactoryFromConfigOrDie(restConfig),
-		Helm:  helm.NewFactoryFromConfigOrDie(restConfig),
-		K8s:   k8s,
-		Auth:  rbac.NewFactoryFromConfigOrDie(restConfig),
-		Apps:  apps.NewFactoryFromConfigOrDie(restConfig),
-		Batch: batch.NewFactoryFromConfigOrDie(restConfig),
-		Core:  core.NewFactoryFromConfigOrDie(restConfig),
-		Event: recorder,
+		K3s:       k3s.NewFactoryFromConfigOrDie(restConfig),
+		Helm:      helm.NewFactoryFromConfigOrDie(restConfig),
+		K8s:       k8s,
+		Auth:      rbac.NewFactoryFromConfigOrDie(restConfig),
+		Apps:      apps.NewFactoryFromConfigOrDie(restConfig),
+		Batch:     batch.NewFactoryFromConfigOrDie(restConfig),
+		Core:      core.NewFactoryFromConfigOrDie(restConfig),
+		Discovery: discovery.NewFactoryFromConfigOrDie(restConfig),
+		Event:     recorder,
 	}, nil
 }
 
