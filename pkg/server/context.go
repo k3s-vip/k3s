@@ -4,10 +4,9 @@ import (
 	"context"
 	"time"
 
-	k3scrds "github.com/k3s-io/api/pkg/crds"
-	"github.com/k3s-io/api/pkg/generated/controllers/k3s.cattle.io"
-	helmcrds "github.com/k3s-io/helm-controller/pkg/crds"
 	"github.com/k3s-io/helm-controller/pkg/generated/controllers/helm.cattle.io"
+	addoncrd "github.com/k3s-io/k3s/pkg/crds"
+	"github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
 	pkgerrors "github.com/pkg/errors"
@@ -79,10 +78,7 @@ func NewContext(ctx context.Context, config *Config, forServer bool) (*Context, 
 type crdLister func() ([]*apiextv1.CustomResourceDefinition, error)
 
 func registerCrds(ctx context.Context, config *Config, restConfig *rest.Config) error {
-	listers := []crdLister{k3scrds.List}
-	if !config.ControlConfig.DisableHelmController {
-		listers = append(listers, helmcrds.List)
-	}
+	listers := []crdLister{addoncrd.List}
 
 	crds := []*apiextv1.CustomResourceDefinition{}
 	for _, list := range listers {
