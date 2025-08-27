@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd"
 	"github.com/fsnotify/fsnotify"
 	"github.com/k3s-io/k3s/pkg/agent/cri"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
