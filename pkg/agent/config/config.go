@@ -616,7 +616,7 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 	nodeConfig.Containerd.NoDefault = envInfo.ContainerdNoDefault
 	nodeConfig.Containerd.NonrootDevices = envInfo.ContainerdNonrootDevices
 	nodeConfig.Containerd.Debug = envInfo.Debug
-	nodeConfig.Containerd.Template = filepath.Join(envInfo.DataDir, "agent", "etc", "containerd")
+	nodeConfig.Containerd.Template = filepath.Join(envInfo.DataDir, "agent", "etc", "containerd", "config.toml.tmpl")
 
 	if envInfo.Rootless {
 		nodeConfig.AgentConfig.RootDir = filepath.Join(envInfo.DataDir, "agent", "kubelet")
