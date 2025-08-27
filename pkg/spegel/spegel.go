@@ -17,7 +17,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/containerd/remotes/docker"
 	"github.com/k3s-io/k3s/pkg/agent/https"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/server/auth"
