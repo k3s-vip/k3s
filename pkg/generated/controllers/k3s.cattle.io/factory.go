@@ -8,7 +8,7 @@ package k3s
 
 import (
 	"github.com/rancher/lasso/pkg/controller"
-	"github.com/rancher/wrangler/v3/pkg/generic"
+	"github.com/rancher/wrangler/pkg/generic"
 	"k8s.io/client-go/rest"
 )
 
