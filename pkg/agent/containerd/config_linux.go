@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
-	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/plugins/snapshots/overlay/overlayutils"
-	fuseoverlayfs "github.com/containerd/fuse-overlayfs-snapshotter/v2"
+	"github.com/containerd/containerd"
+	overlayutils "github.com/containerd/containerd/snapshots/overlay/overlayutils"
+	fuseoverlayfs "github.com/containerd/fuse-overlayfs-snapshotter"
 	stargz "github.com/containerd/stargz-snapshotter/service"
 	"github.com/docker/docker/pkg/parsers/kernel"
 	"github.com/k3s-io/k3s/pkg/agent/templates"
@@ -37,17 +37,9 @@ func getContainerdArgs(cfg *config.Node) []string {
 	args := []string{
 		"containerd",
 		"-c", cfg.Containerd.Config,
-	}
-
-	// Historically the linux containerd config template did not include
-	// address/state/root settings, so they need to be passed on the command line
-	// in case the user-provided template still lacks them.
-	if cfg.Containerd.ConfigVersion < 3 {
-		args = append(args,
-			"-a", cfg.Containerd.Address,
-			"--state", cfg.Containerd.State,
-			"--root", cfg.Containerd.Root,
-		)
+		"-a", cfg.Containerd.Address,
+		"--state", cfg.Containerd.State,
+		"--root", cfg.Containerd.Root,
 	}
 	return args
 }
