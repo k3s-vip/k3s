@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/containerd/v2/pkg/namespaces"
-	"github.com/containerd/errdefs"
-	docker "github.com/distribution/reference"
+	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/pkg/cri/constants"
+	"github.com/containerd/containerd/pkg/cri/labels"
+	"github.com/containerd/containerd/reference/docker"
 	reference "github.com/google/go-containerregistry/pkg/name"
 	"github.com/k3s-io/k3s/pkg/agent/cri"
 	util2 "github.com/k3s-io/k3s/pkg/agent/util"
@@ -36,16 +38,6 @@ var (
 	// ref: https://github.com/containerd/containerd/blob/release/1.7/pkg/cri/labels/labels.go
 	k3sPinnedImageLabelKey   = "io.cattle." + version.Program + ".pinned"
 	k3sPinnedImageLabelValue = "pinned"
-)
-
-const (
-	// these were previously exported via containerd/containerd/pkg/cri/constants
-	// and containerd/containerd/pkg/cri/labels but have been made internal as of
-	// containerd v2.
-	criContainerdPrefix       = "io.cri-containerd"
-	criPinnedImageLabelKey    = criContainerdPrefix + ".pinned"
-	criPinnedImageLabelValue  = "pinned"
-	criK8sContainerdNamespace = "k8s.io"
 )
 
 // Run configures and starts containerd as a child process. Once it is up, images are preloaded
@@ -140,7 +132,7 @@ func PreloadImages(ctx context.Context, cfg *config.Node) error {
 	defer criConn.Close()
 
 	// Ensure that our images are imported into the correct namespace
-	ctx = namespaces.WithNamespace(ctx, criK8sContainerdNamespace)
+	ctx = namespaces.WithNamespace(ctx, constants.K8sContainerdNamespace)
 
 	// At startup all leases from k3s are cleared; we no longer use leases to lock content
 	if err := clearLeases(ctx, client); err != nil {
@@ -231,7 +223,7 @@ func clearLabels(ctx context.Context, client *containerd.Client) error {
 	}
 	for _, image := range images {
 		delete(image.Labels, k3sPinnedImageLabelKey)
-		delete(image.Labels, criPinnedImageLabelKey)
+		delete(image.Labels, labels.PinnedImageLabelKey)
 		if _, err := imageService.Update(ctx, image, "labels"); err != nil {
 			errs = append(errs, pkgerrors.WithMessage(err, "failed to delete labels from image "+image.Name))
 		}
@@ -246,7 +238,7 @@ func labelImages(ctx context.Context, client *containerd.Client, images []images
 	imageService := client.ImageService()
 	for i, image := range images {
 		if image.Labels[k3sPinnedImageLabelKey] == k3sPinnedImageLabelValue &&
-			image.Labels[criPinnedImageLabelKey] == criPinnedImageLabelValue {
+			image.Labels[labels.PinnedImageLabelKey] == labels.PinnedImageLabelValue {
 			continue
 		}
 
@@ -255,7 +247,7 @@ func labelImages(ctx context.Context, client *containerd.Client, images []images
 		}
 
 		image.Labels[k3sPinnedImageLabelKey] = k3sPinnedImageLabelValue
-		image.Labels[criPinnedImageLabelKey] = criPinnedImageLabelValue
+		image.Labels[labels.PinnedImageLabelKey] = labels.PinnedImageLabelValue
 		updatedImage, err := imageService.Update(ctx, image, "labels")
 		if err != nil {
 			errs = append(errs, pkgerrors.WithMessage(err, "failed to add labels to image "+image.Name))
