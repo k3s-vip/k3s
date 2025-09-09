@@ -33,7 +33,7 @@ var _ routing.Bootstrapper = &serverBootstrapper{}
 var _ routing.Bootstrapper = &chainingBootstrapper{}
 
 type selfBootstrapper struct {
-	id string
+	id *peer.AddrInfo
 }
 
 // NewSelfBootstrapper returns a stub p2p bootstrapper that just returns its own ID
@@ -41,20 +41,16 @@ func NewSelfBootstrapper() routing.Bootstrapper {
 	return &selfBootstrapper{}
 }
 
-func (s *selfBootstrapper) Run(ctx context.Context, id string) error {
-	s.id = id
+func (s *selfBootstrapper) Run(ctx context.Context, id peer.AddrInfo) error {
+	s.id = &id
 	return waitForDone(ctx)
 }
 
 func (s *selfBootstrapper) Get(ctx context.Context) ([]peer.AddrInfo, error) {
-	if s.id == "" {
+	if s.id == nil {
 		return nil, errors.New("p2p peer not ready")
 	}
-	self, err := peer.AddrInfoFromString(s.id)
-	if err != nil {
-		return nil, err
-	}
-	return []peer.AddrInfo{*self}, nil
+	return []peer.AddrInfo{*s.id}, nil
 }
 
 type agentBootstrapper struct {
@@ -77,7 +73,7 @@ func NewAgentBootstrapper(server, token, dataDir string) routing.Bootstrapper {
 	}
 }
 
-func (c *agentBootstrapper) Run(ctx context.Context, id string) error {
+func (c *agentBootstrapper) Run(ctx context.Context, id peer.AddrInfo) error {
 	if c.server != "" && c.token != "" {
 		withCert := clientaccess.WithClientCertificate(c.clientCert, c.clientKey)
 		info, err := clientaccess.ParseAndValidateToken(c.server, c.token, withCert)
@@ -103,21 +99,25 @@ func (c *agentBootstrapper) Run(ctx context.Context, id string) error {
 			logrus.Debugf("Failed to update P2P address annotations and labels: %v", err)
 			return false, nil
 		}
-
 		if node.Annotations == nil {
 			node.Annotations = map[string]string{}
 		}
-		node.Annotations[P2pAddressAnnotation] = id
+		node.Annotations[P2pAddressAnnotation] = id.Addrs[0].String() + "/p2p/" + id.ID.String()
+		b, err := id.MarshalJSON()
+		if err != nil {
+			return false, err
+		}
+		node.Annotations[P2pMulAddrAnnotation] = string(b)
+
 		if node.Labels == nil {
 			node.Labels = map[string]string{}
 		}
 		node.Labels[P2pEnabledLabel] = "true"
-
 		if _, err = nodes.Update(ctx, node, metav1.UpdateOptions{}); err != nil {
 			logrus.Debugf("Failed to update P2P address annotations and labels: %v", err)
 			return false, nil
 		}
-		logrus.Infof("Node P2P address annotations and labels added: %s", id)
+		logrus.Infof("Node P2P address annotations and labels added: %s %s", node.Annotations[P2pAddressAnnotation], node.Annotations[P2pMulAddrAnnotation])
 		return true, nil
 	})
 	return waitForDone(ctx)
@@ -164,7 +164,7 @@ func NewServerBootstrapper(controlConfig *config.Control) routing.Bootstrapper {
 	}
 }
 
-func (s *serverBootstrapper) Run(ctx context.Context, _ string) error {
+func (s *serverBootstrapper) Run(ctx context.Context, _ peer.AddrInfo) error {
 	return waitForDone(ctx)
 }
 
@@ -198,6 +198,12 @@ func (s *serverBootstrapper) Get(ctx context.Context) ([]peer.AddrInfo, error) {
 			// don't return the address of a not-ready node
 			continue
 		}
+		if val, ok := node.Annotations[P2pMulAddrAnnotation]; ok {
+			info := &peer.AddrInfo{}
+			if err := info.UnmarshalJSON([]byte(val)); err == nil {
+				addrs = append(addrs, *info)
+			}
+		}
 		if val, ok := node.Annotations[P2pAddressAnnotation]; ok {
 			for _, addr := range strings.Split(val, ",") {
 				if info, err := peer.AddrInfoFromString(addr); err == nil {
@@ -223,7 +229,7 @@ func NewChainingBootstrapper(bootstrappers ...routing.Bootstrapper) routing.Boot
 	}
 }
 
-func (c *chainingBootstrapper) Run(ctx context.Context, id string) error {
+func (c *chainingBootstrapper) Run(ctx context.Context, id peer.AddrInfo) error {
 	eg, ctx := errgroup.WithContext(ctx)
 	for i := range c.bootstrappers {
 		b := c.bootstrappers[i]

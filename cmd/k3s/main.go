@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -350,12 +349,12 @@ func extract(dataDir string) (string, error) {
 		return "", err
 	}
 	for _, ent := range ents {
-		if info, err := ent.Info(); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		if info, err := ent.Info(); err == nil && info.Mode()&os.ModeSymlink == os.ModeSymlink {
 			if target, err := os.Readlink(filepath.Join(dir, "bin", ent.Name())); err == nil && target == "cni" {
 				src := filepath.Join(cniPath, ent.Name())
 				// Check if plugin already exists in stable CNI bin dir
 				if info, err := os.Lstat(src); err == nil {
-					if info.Mode()&fs.ModeSymlink != 0 {
+					if info.Mode()&os.ModeSymlink == os.ModeSymlink {
 						// Exists and is a symlink, remove it so we can create a new symlink for the new bin.
 						os.Remove(src)
 					} else {

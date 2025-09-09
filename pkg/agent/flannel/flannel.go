@@ -27,7 +27,9 @@ import (
 	"github.com/flannel-io/flannel/pkg/backend"
 	"github.com/flannel-io/flannel/pkg/ip"
 	"github.com/flannel-io/flannel/pkg/subnet/kube"
+	"github.com/flannel-io/flannel/pkg/trafficmngr"
 	"github.com/flannel-io/flannel/pkg/trafficmngr/iptables"
+	"github.com/flannel-io/flannel/pkg/trafficmngr/nftables"
 	"github.com/joho/godotenv"
 	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -51,7 +53,7 @@ var (
 	FlannelExternalIPv6Annotation = FlannelBaseAnnotation + "/public-ipv6-overwrite"
 )
 
-func flannel(ctx context.Context, flannelIface *net.Interface, flannelConf, kubeConfigFile string, flannelIPv6Masq bool, nm netMode) error {
+func flannel(ctx context.Context, wg *sync.WaitGroup, flannelIface *net.Interface, flannelConf, kubeConfigFile string, flannelIPv6Masq bool, nm netMode) error {
 	extIface, err := LookupExtInterface(flannelIface, nm)
 	if err != nil {
 		return pkgerrors.WithMessage(err, "failed to find the interface")
@@ -80,14 +82,23 @@ func flannel(ctx context.Context, flannelIface *net.Interface, flannelConf, kube
 		return pkgerrors.WithMessage(err, "failed to create the flannel backend")
 	}
 
-	bn, err := be.RegisterNetwork(ctx, &sync.WaitGroup{}, config)
+	bn, err := be.RegisterNetwork(ctx, wg, config)
 	if err != nil {
 		return pkgerrors.WithMessage(err, "failed to register flannel network")
 	}
-	trafficMngr := &iptables.IPTablesManager{}
+
+	// Instanciate a TrafficManager to clean-up the rules of the backend we don't use
+	// This is to ensure a clean state in case flannel is restarted with a different choice
+	cleanupMngr := newTrafficManager(!config.EnableNFTables)
+	err = cleanupMngr.CleanUp(ctx)
+	if err != nil {
+		return pkgerrors.WithMessage(err, "failed to clean up flannel network")
+	}
+	//Create TrafficManager and instantiate it based on whether we use iptables or nftables
+	trafficMngr := newTrafficManager(config.EnableNFTables)
 	err = trafficMngr.Init(ctx)
 	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to initialize flannel ipTables manager")
+		return pkgerrors.WithMessage(err, "failed to initialize flannel traffic manager")
 	}
 
 	if nm.IPv4Enabled() && config.Network.Empty() {
@@ -286,4 +297,12 @@ func ReadIP6CIDRsFromSubnetFile(path string, CIDRKey string) []ip.IP6Net {
 		}
 	}
 	return prevCIDRs
+}
+
+func newTrafficManager(useNftables bool) trafficmngr.TrafficManager {
+	if useNftables {
+		return &nftables.NFTablesManager{}
+	} else {
+		return &iptables.IPTablesManager{}
+	}
 }
