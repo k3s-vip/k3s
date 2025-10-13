@@ -16,6 +16,8 @@ import (
 	"github.com/k3s-io/k3s/pkg/agent/containerd"
 	"github.com/k3s-io/k3s/pkg/agent/cri"
 	"github.com/k3s-io/k3s/pkg/agent/cridockerd"
+	"github.com/k3s-io/k3s/pkg/agent/flannel"
+	"github.com/k3s-io/k3s/pkg/agent/netpol"
 	"github.com/k3s-io/k3s/pkg/cli/cmds"
 	daemonconfig "github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/signals"
@@ -27,7 +29,6 @@ import (
 	cloudprovider "k8s.io/cloud-provider"
 	ccmapp "k8s.io/cloud-provider/app"
 	cloudcontrollerconfig "k8s.io/cloud-provider/app/config"
-	"k8s.io/cloud-provider/names"
 	ccmopt "k8s.io/cloud-provider/options"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
@@ -144,7 +145,7 @@ func (e *Embedded) APIServer(ctx context.Context, args []string) error {
 }
 
 func (e *Embedded) Scheduler(ctx context.Context, nodeReady <-chan struct{}, args []string) error {
-	command := sapp.NewSchedulerCommand(ctx.Done())
+	command := sapp.NewSchedulerCommand()
 	command.SetArgs(args)
 
 	go func() {
@@ -203,13 +204,11 @@ func (*Embedded) CloudControllerManager(ctx context.Context, ccmRBACReady <-chan
 		return cloud
 	}
 
-	controllerAliases := names.CCMControllerAliases()
 
 	command := ccmapp.NewCloudControllerManagerCommand(
 		ccmOptions,
 		cloudInitializer,
 		ccmapp.DefaultInitFuncConstructors,
-		controllerAliases,
 		cliflag.NamedFlagSets{},
 		ctx.Done())
 	command.SetArgs(args)
@@ -249,6 +248,22 @@ func (e *Embedded) CRI(ctx context.Context, cfg *daemonconfig.Node) error {
 		return CloseIfNilErr(cri.WaitForService(ctx, cfg.ContainerRuntimeEndpoint, "CRI"), e.criReady)
 	}
 	return CloseIfNilErr(nil, e.criReady)
+}
+
+func (e *Embedded) CNI(ctx context.Context, wg *sync.WaitGroup, cfg *daemonconfig.Node) error {
+	if !cfg.NoFlannel {
+		if err := flannel.Run(ctx, wg, cfg); err != nil {
+			return err
+		}
+	}
+
+	if !cfg.AgentConfig.DisableNPC {
+		if err := netpol.Run(ctx, wg, cfg); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (e *Embedded) APIServerReadyChan() <-chan struct{} {

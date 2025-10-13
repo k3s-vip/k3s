@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,7 +136,7 @@ func (c *agentBootstrapper) Run(ctx context.Context, id peer.AddrInfo) error {
 			return false, err
 		}
 		node.Annotations[P2pMulAddrAnnotation] = string(b)
-		node.Annotations[P2pAddressAnnotation] = fmt.Sprintf("%s/p2p/%s", id.Addrs[0].String(), id.ID.String())
+		node.Annotations[P2pAddressAnnotation] = id.Addrs[0].String() + "/p2p/" + id.ID.String()
 
 		if node.Labels == nil {
 			node.Labels = map[string]string{}

@@ -37,6 +37,7 @@ import (
 	"github.com/spegel-org/spegel/pkg/registry"
 	"github.com/spegel-org/spegel/pkg/routing"
 	"github.com/spegel-org/spegel/pkg/state"
+	"github.com/spegel-org/spegel/pkg/web"
 	"k8s.io/component-base/metrics/legacyregistry"
 )
 
@@ -54,8 +55,10 @@ var (
 	P2pEnabledLabel      = "p2p." + version.Program + ".cattle.io/enabled"
 	P2pPortEnv           = version.ProgramUpper + "_P2P_PORT"
 	P2pEnableLatestEnv   = version.ProgramUpper + "_P2P_ENABLE_LATEST"
+	P2PEnableDebugWebEnv = version.ProgramUpper + "_P2P_ENABLE_DEBUG_WEB"
 
 	resolveLatestTag = false
+	enableDebugWeb   = false
 
 	// Agents request a list of peers when joining, and then again periodically afterwards.
 	// Limit the number of concurrent peer list requests that will be served simultaneously.
@@ -96,7 +99,6 @@ type Config struct {
 
 // These values are not currently configurable
 const (
-	resolveRetries    = 3
 	resolveTimeout    = time.Second * 5
 	registryNamespace = "k8s.io"
 	defaultRouterPort = "5001"
@@ -185,6 +187,15 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 		}
 	}
 
+	// get debug web configuration override
+	if env := os.Getenv(P2PEnableDebugWebEnv); env != "" {
+		if b, err := strconv.ParseBool(env); err != nil {
+			logrus.Warnf("Invalid %s value; using default %v", P2PEnableDebugWebEnv, enableDebugWeb)
+		} else {
+			enableDebugWeb = b
+		}
+	}
+
 	// get port and start p2p router
 	routerPort := defaultRouterPort
 	if env := os.Getenv(P2pPortEnv); env != "" {
@@ -215,8 +226,7 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 	client := clientaccess.GetHTTPClient(caCert, c.ClientCertFile, c.ClientKeyFile)
 	metrics.Register()
 	registryOpts := []registry.RegistryOption{
-		registry.WithResolveLatestTag(resolveLatestTag),
-		registry.WithResolveRetries(resolveRetries),
+		registry.WithRegistryFilters(nil),
 		registry.WithResolveTimeout(resolveTimeout),
 		registry.WithTransport(client.Transport),
 	}
@@ -230,10 +240,12 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 	}
 
 	trackerOpts := []state.TrackerOption{
-		state.WithResolveLatestTag(resolveLatestTag),
+		state.WithRegistryFilters(nil),
 	}
 
 	// Track images available in containerd and publish via p2p router
+	// The state tracker exits if it experiences any errors processing content from containerd,
+	// so we restart it after a short delay.
 	go func() {
 		<-criReadyChan
 		for {
@@ -256,9 +268,23 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 	sRouter.Use(auth.MaxInFlight(maxNonMutatingPeerInfoRequests, maxMutatingPeerInfoRequests))
 	sRouter.Handle("", c.peerInfo())
 
+	if enableDebugWeb {
+		webOpts := []web.WebOption{
+			web.WithAddress(net.JoinHostPort(c.ExternalAddress, c.RegistryPort)),
+			web.WithLogger(logr.FromContextOrDiscard(ctx)),
+			web.WithTransport(client.Transport),
+		}
+		web, err := web.NewWeb(c.router, webOpts...)
+		if err != nil {
+			return pkgerrors.WithMessage(err, "failed to enable embedded registry debug web interface")
+		}
+		mRouter.PathPrefix("/debug/web").Handler(web.Handler())
+		logrus.Warn("Embedded registry debug web interface enabled")
+	}
+
 	// Wait up to 5 seconds for the p2p network to find peers.
 	if err := wait.PollUntilContextTimeout(ctx, time.Second, resolveTimeout, true, func(ctx context.Context) (bool, error) {
-		ready, _ := c.router.Ready(ctx)
+		ready, _ := c.Ready(ctx)
 		return ready, nil
 	}); err != nil {
 		logrus.Warn("Failed to wait for distributed registry to become ready, will retry in the background")
