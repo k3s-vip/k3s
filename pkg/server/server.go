@@ -129,6 +129,7 @@ func runControllers(ctx context.Context, config *Config) error {
 	controlConfig.Runtime.K3s = sc.K3s
 	controlConfig.Runtime.Event = sc.Event
 	controlConfig.Runtime.Core = sc.Core
+	controlConfig.Runtime.Discovery = sc.Discovery
 
 	// Create a new context to use for wrangler controllers that is
 	// cancelled on a delay after the signal context. This allows other things
@@ -570,7 +571,6 @@ func setNodeLabelsAndAnnotations(ctx context.Context, nodes v1.NodeClient, confi
 		v, ok := node.Labels[util.ControlPlaneRoleLabelKey]
 		if !ok || v != "true" {
 			node.Labels[util.ControlPlaneRoleLabelKey] = "true"
-			node.Labels[util.MasterRoleLabelKey] = "true"
 		}
 
 		if config.ControlConfig.EncryptSecrets {
