@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rancher/wrangler/v3/pkg/merr"
+	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/sirupsen/logrus"
 	apinet "k8s.io/apimachinery/pkg/util/net"
 	netutils "k8s.io/utils/net"
