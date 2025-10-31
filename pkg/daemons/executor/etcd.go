@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,6 +54,23 @@ func (e *Embedded) ETCD(ctx context.Context, wg *sync.WaitGroup, args *ETCDConfi
 		return nil
 	}
 
+	extraArgs = func(extraArgs []string) []string {
+		argsStr := strings.Join(extraArgs, ",")
+		for key, value := range map[string]string{
+			"quota-backend-bytes":            "8589934592", // 8Gi
+			"warning-apply-duration":         "100000000",  // 100ms
+			"warning-unary-request-duration": "300000000",  // 300ms
+		} {
+			if !strings.Contains(argsStr, key) {
+				if len(argsStr) != 0 {
+					argsStr = key + "=" + value + "," + argsStr
+				} else {
+					argsStr = key + "=" + value
+				}
+			}
+		}
+		return strings.Split(argsStr, ",")
+	}(extraArgs)
 	configFile, err := args.ToConfigFile(extraArgs)
 	if err != nil {
 		return err
