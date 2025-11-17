@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
@@ -352,7 +351,11 @@ func (e *ETCD) Reset(ctx context.Context, wg *sync.WaitGroup, rebootstrap func()
 		defer wg.Done()
 		if executor.IsSelfHosted() {
 			// if the executor requires cri/kubelet to be up to run etcd, wait for container runtime
-			<-executor.CRIReadyChan()
+			select {
+			case <-executor.CRIReadyChan():
+			case <-ctx.Done():
+				return
+			}
 		}
 		wait.PollUntilContextCancel(ctx, time.Second*5, true, func(ctx context.Context) (bool, error) {
 			if err := e.Test(ctx, true); err == nil {
@@ -503,7 +506,11 @@ func (e *ETCD) Start(ctx context.Context, wg *sync.WaitGroup, clientAccessInfo *
 		defer wg.Done()
 		if executor.IsSelfHosted() {
 			// if the executor requires cri/kubelet to be up to run etcd, wait for container runtime
-			<-executor.CRIReadyChan()
+			select {
+			case <-executor.CRIReadyChan():
+			case <-ctx.Done():
+				return
+			}
 		}
 		// pollJoin blocks until the join is successful, or times out and initiates shutdown
 		e.pollJoin(ctx, wg, clientAccessInfo)
@@ -726,7 +733,7 @@ func (e *ETCD) setName(force bool) error {
 		if e.config.ServerNodeName == "" {
 			return errors.New("server node name not set")
 		}
-		e.name = e.config.ServerNodeName + "-" + uuid.New().String()[:8]
+		e.name = e.EndpointName() + strings.ReplaceAll(e.address, ".", "-")
 		if err := os.MkdirAll(filepath.Dir(fileName), 0700); err != nil {
 			return err
 		}
@@ -1217,7 +1224,11 @@ func (e *ETCD) RemovePeer(ctx context.Context, name, address string, allowSelfRe
 func (e *ETCD) manageLearners(ctx context.Context) {
 	if executor.IsSelfHosted() {
 		// if the executor requires cri/kubelet to be up to run etcd, wait for container runtime
-		<-executor.CRIReadyChan()
+		select {
+		case <-executor.CRIReadyChan():
+		case <-ctx.Done():
+			return
+		}
 	}
 	wait.UntilWithContext(ctx, func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, manageTickerTime)
