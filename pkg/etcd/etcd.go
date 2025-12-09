@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
@@ -28,7 +27,6 @@ import (
 	"github.com/k3s-io/k3s/pkg/daemons/executor"
 	"github.com/k3s-io/k3s/pkg/etcd/s3"
 	"github.com/k3s-io/k3s/pkg/etcd/snapshot"
-	embedded "github.com/k3s-io/k3s/pkg/executor/embed/etcd"
 	"github.com/k3s-io/k3s/pkg/server/auth"
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
@@ -36,7 +34,6 @@ import (
 	kine "github.com/k3s-io/kine/pkg/app"
 	"github.com/k3s-io/kine/pkg/client"
 	"github.com/k3s-io/kine/pkg/endpoint"
-	"github.com/otiai10/copy"
 	pkgerrors "github.com/pkg/errors"
 	certutil "github.com/rancher/dynamiclistener/cert"
 	controllerv1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
@@ -726,7 +723,7 @@ func (e *ETCD) setName(force bool) error {
 		if e.config.ServerNodeName == "" {
 			return errors.New("server node name not set")
 		}
-		e.name = e.config.ServerNodeName + "-" + uuid.New().String()[:8]
+		e.name = e.EndpointName() + strings.ReplaceAll(e.address, ".", "-")
 		if err := os.MkdirAll(filepath.Dir(fileName), 0700); err != nil {
 			return err
 		}
@@ -1070,74 +1067,6 @@ func (e *ETCD) cluster(ctx context.Context, wg *sync.WaitGroup, reset bool, opti
 		ExperimentalInitialCorruptCheck:         true,
 		ExperimentalWatchProgressNotifyInterval: e.config.Datastore.NotifyInterval,
 	}, e.config.ExtraEtcdArgs, e.Test)
-}
-
-func (e *ETCD) StartEmbeddedTemporary(ctx context.Context, wg *sync.WaitGroup) error {
-	etcdDataDir := dbDir(e.config)
-	tmpDataDir := etcdDataDir + "-tmp"
-	os.RemoveAll(tmpDataDir)
-
-	go func() {
-		<-ctx.Done()
-		if err := os.RemoveAll(tmpDataDir); err != nil {
-			logrus.Warnf("Failed to remove etcd temp dir: %v", err)
-		}
-	}()
-
-	if e.client != nil {
-		return errors.New("etcd datastore already started")
-	}
-
-	client, conn, err := getClient(ctx, e.config)
-	if err != nil {
-		return err
-	}
-	e.client = client
-
-	go func() {
-		<-ctx.Done()
-		e.client = nil
-		conn.Close()
-	}()
-
-	if err := copy.Copy(etcdDataDir, tmpDataDir, copy.Options{PreserveOwner: true}); err != nil {
-		return err
-	}
-
-	endpoints := getEndpoints(e.config)
-	clientURL := endpoints[0]
-	// peer URL is usually 1 more than client
-	peerURL, err := addPort(endpoints[0], 1)
-	if err != nil {
-		return err
-	}
-	// client http URL is usually 3 more than client, after peer and metrics
-	clientHTTPURL, err := addPort(endpoints[0], 3)
-	if err != nil {
-		return err
-	}
-
-	return embedded.StartETCD(ctx, wg, &executor.ETCDConfig{
-		InitialOptions:       executor.InitialOptions{AdvertisePeerURL: peerURL},
-		DataDir:              tmpDataDir,
-		ForceNewCluster:      true,
-		AdvertiseClientURLs:  clientURL,
-		ListenClientURLs:     clientURL,
-		ListenClientHTTPURLs: clientHTTPURL,
-		ListenPeerURLs:       peerURL,
-		Logger:               "zap",
-		LogOutputs:           []string{"stderr"},
-		HeartbeatInterval:    500,
-		ElectionTimeout:      5000,
-		SnapshotCount:        10000,
-		Name:                 e.name,
-		SocketOpts: executor.ETCDSocketOpts{
-			ReuseAddress: true,
-			ReusePort:    true,
-		},
-		ExperimentalInitialCorruptCheck:         true,
-		ExperimentalWatchProgressNotifyInterval: e.config.Datastore.NotifyInterval,
-	}, append(e.config.ExtraEtcdArgs, "--max-snapshots=0", "--max-wals=0"))
 }
 
 func addPort(address string, offset int) (string, error) {
