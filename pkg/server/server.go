@@ -262,8 +262,7 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 			auth.V1().ClusterRoleBinding(),
 			core.V1().ServiceAccount(),
 			core.V1().ConfigMap(),
-			core.V1().Secret(),
-			core.V1().Secret().Cache())
+			core.V1().Secret())
 	}
 
 	if config.ControlConfig.Rootless {
@@ -555,7 +554,7 @@ func setNodeLabelsAndAnnotations(ctx context.Context, nodes v1.NodeClient, confi
 	}
 
 	patcher := util.NewPatcher[*corev1.Node](nodes)
-	return wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+	return wait.PollImmediateUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
 		nodeName := os.Getenv("NODE_NAME")
 		if nodeName == "" {
 			logrus.Info("Waiting for control-plane node agent startup")
