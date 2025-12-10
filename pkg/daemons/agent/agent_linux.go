@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 package agent
 
@@ -75,6 +74,7 @@ func kubeletArgsAndConfig(cfg *config.Agent) (map[string]string, *kubeletconfig.
 		return nil, nil, err
 	}
 	argsMap := map[string]string{
+		"config":     cfg.KubeletConfig,
 		"config-dir": cfg.KubeletConfigDir,
 		"kubeconfig": cfg.KubeConfigKubelet,
 		// note: KubeletConfiguration will omit this field when marshalling if it is set to 0, so we set it via CLI

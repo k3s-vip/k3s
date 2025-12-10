@@ -1,5 +1,4 @@
 //go:build windows && !no_embedded_executor
-// +build windows,!no_embedded_executor
 
 package embed
 
@@ -19,10 +18,12 @@ const (
 	networkName = "flannel.4096"
 )
 
+type IP4 struct {
+	IP string `json:"ip"`
+}
+
 type SourceVipResponse struct {
-	IP4 struct {
-		IP string `json:"ip"`
-	} `json:"ip4"`
+	IP4 IP4 `json:"ip4"`
 }
 
 func platformKubeProxyArgs(nodeConfig *daemonconfig.Node) map[string]string {

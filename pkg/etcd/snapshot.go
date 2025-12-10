@@ -169,12 +169,16 @@ func (e *ETCD) decompressSnapshot(snapshotDir, snapshotFile string) (string, err
 		if err != nil {
 			return "", err
 		}
+
+		//revive:disable-next-line:defer
 		defer decompressed.Close()
 
 		ss, err := sf.Open()
 		if err != nil {
 			return "", err
 		}
+
+		//revive:disable-next-line:defer
 		defer ss.Close()
 
 		if _, err := io.Copy(decompressed, ss); err != nil {
@@ -235,6 +239,7 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 		logrus.Warnf("Unable to take snapshot: not supported for learner")
 		return nil, nil
 	}
+	e.defragment(ctx)
 
 	snapshotDir, err := snapshotDir(e.config, true)
 	if err != nil {

@@ -13,8 +13,8 @@ import (
 	agentutil "github.com/k3s-io/k3s/pkg/agent/util"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/signals"
-	"github.com/k3s-io/k3s/pkg/vpn"
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/vpn"
 	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -216,17 +216,17 @@ func createFlannelConf(nodeConfig *config.Node) error {
 		confJSON = strings.ReplaceAll(confJSON, "%CIDR_IPV6%", emptyIPv6Network)
 	}
 
-	var backendConf string
-
-	// precheck and error out unsupported flannel backends.
-	switch nodeConfig.Flannel.Backend {
-	case BackendHostGW:
-	case BackendTailscale:
-	case BackendWireguardNative:
-		if goruntime.GOOS == "windows" {
+	// precheck and error out unsupported flannel backends for windows.
+	if goruntime.GOOS == "windows" {
+		switch nodeConfig.Flannel.Backend {
+		case BackendVXLAN, BackendNone:
+			// these are the only supported backends
+		default:
 			return fmt.Errorf("unsupported flannel backend '%s' for Windows", nodeConfig.Flannel.Backend)
 		}
 	}
+
+	var backendConf string
 
 	switch nodeConfig.Flannel.Backend {
 	case BackendVXLAN:
@@ -242,7 +242,7 @@ func createFlannelConf(nodeConfig *config.Node) error {
 			routes = append(routes, "$IPV6SUBNET")
 		}
 		if len(routes) == 0 {
-			return fmt.Errorf("incorrect netMode for flannel tailscale backend")
+			return errors.New("incorrect netMode for flannel tailscale backend")
 		}
 		advertisedRoutes, err := vpn.GetAdvertisedRoutes()
 		if err == nil && advertisedRoutes != nil {

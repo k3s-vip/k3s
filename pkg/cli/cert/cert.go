@@ -51,12 +51,12 @@ type CertificateInfo struct {
 }
 
 // collectCertInfo collects information about certificates
-func collectCertInfo(controlConfig config.Control, ServicesList []string) (*CertificateInfo, error) {
+func collectCertInfo(controlConfig config.Control, servicesList []string) (*CertificateInfo, error) {
 	result := &CertificateInfo{}
 	now := time.Now()
 	warn := now.Add(time.Hour * 24 * config.CertificateRenewDays)
 
-	fileMap, err := services.FilesForServices(controlConfig, ServicesList)
+	fileMap, err := services.FilesForServices(controlConfig, servicesList)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +70,6 @@ func collectCertInfo(controlConfig config.Control, ServicesList []string) (*Cert
 			}
 
 			for _, cert := range certs {
-
 				expiration := cert.NotAfter
 				status := k3sutil.GetCertStatus(cert, now, warn)
 				if status == k3sutil.CertStatusNotYetValid {
@@ -93,8 +92,8 @@ func collectCertInfo(controlConfig config.Control, ServicesList []string) (*Cert
 	return result, nil
 }
 
-// CertFormatter defines the interface for formatting certificate information
-type CertFormatter interface {
+// Formatter defines the interface for formatting certificate information
+type Formatter interface {
 	Format(*CertificateInfo) error
 }
 
@@ -134,8 +133,8 @@ func (f *TableFormatter) Format(certInfo *CertificateInfo) error {
 	now := certInfo.ReferenceTime
 	defer w.Flush()
 
-	fmt.Fprintf(w, "\nFILENAME\tSUBJECT\tUSAGES\tEXPIRES\tRESIDUAL TIME\tSTATUS\n")
-	fmt.Fprintf(w, "--------\t-------\t------\t-------\t-------------\t------\n")
+	fmt.Fprint(w, "\nFILENAME\tSUBJECT\tUSAGES\tEXPIRES\tRESIDUAL TIME\tSTATUS\n")
+	fmt.Fprint(w, "--------\t-------\t------\t-------\t-------------\t------\n")
 
 	for _, cert := range certInfo.Certificates {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
@@ -233,7 +232,7 @@ func check(app *cli.Context, cfg *cmds.Server) error {
 	}
 	outFmt := app.String("output")
 
-	var formatter CertFormatter
+	var formatter Formatter
 	switch outFmt {
 	case "text":
 		formatter = &TextFormatter{Writer: os.Stdout}

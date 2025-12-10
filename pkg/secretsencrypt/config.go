@@ -6,14 +6,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/k3s-io/k3s/pkg/generated/clientset/versioned/scheme"
@@ -69,7 +72,6 @@ func GetEncryptionProviders(runtime *config.ControlRuntime) ([]apiserverconfigv1
 
 // GetEncryptionKeys returns a list of encryption keys from the current encryption configuration.
 func GetEncryptionKeys(runtime *config.ControlRuntime) (*EncryptionKeys, error) {
-
 	currentKeys := &EncryptionKeys{}
 	providers, err := GetEncryptionProviders(runtime)
 	if err != nil {
@@ -92,7 +94,7 @@ func GetEncryptionKeys(runtime *config.ControlRuntime) (*EncryptionKeys, error) 
 			currentKeys.SBKeys = append(currentKeys.SBKeys, p.Secretbox.Keys...)
 		}
 		if p.AESGCM != nil || p.KMS != nil {
-			return nil, fmt.Errorf("unsupported encryption keys found")
+			return nil, errors.New("unsupported encryption keys found")
 		}
 	}
 	return currentKeys, nil
@@ -101,7 +103,6 @@ func GetEncryptionKeys(runtime *config.ControlRuntime) (*EncryptionKeys, error) 
 // WriteEncryptionConfig writes the encryption configuration to the file system.
 // The provider arg will be placed first, and is used to encrypt new secrets.
 func WriteEncryptionConfig(runtime *config.ControlRuntime, keys *EncryptionKeys, provider string, enable bool) error {
-
 	var providers []apiserverconfigv1.ProviderConfiguration
 	var primary apiserverconfigv1.ProviderConfiguration
 	var secondary *apiserverconfigv1.ProviderConfiguration
@@ -174,6 +175,39 @@ func WriteEncryptionConfig(runtime *config.ControlRuntime, keys *EncryptionKeys,
 	return util.AtomicWrite(runtime.EncryptionConfig, jsonfile, 0600)
 }
 
+// WriteIdentityConfig creates an identity-only configuration for clusters that
+// previously had no encryption config, effectively disabling encryption, but
+// preparing a node for future reencryption.
+func WriteIdentityConfig(control *config.Control) error {
+	providers := []apiserverconfigv1.ProviderConfiguration{
+		{
+			Identity: &apiserverconfigv1.IdentityConfiguration{},
+		},
+	}
+
+	encConfig := apiserverconfigv1.EncryptionConfiguration{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "EncryptionConfiguration",
+			APIVersion: "apiserver.config.k8s.io/v1",
+		},
+		Resources: []apiserverconfigv1.ResourceConfiguration{
+			{
+				Resources: []string{"secrets"},
+				Providers: providers,
+			},
+		},
+	}
+	jsonfile, err := json.Marshal(encConfig)
+	if err != nil {
+		return err
+	}
+	if control.Runtime.EncryptionConfig == "" {
+		control.Runtime.EncryptionConfig = filepath.Join(control.DataDir, "cred", "encryption-config.json")
+	}
+	logrus.Info("Enabling secrets encryption with identity provider, restart with secrets-encryption")
+	return util.AtomicWrite(control.Runtime.EncryptionConfig, jsonfile, 0600)
+}
+
 func GenEncryptionConfigHash(runtime *config.ControlRuntime) (string, error) {
 	curEncryptionByte, err := os.ReadFile(runtime.EncryptionConfig)
 	if err != nil {
@@ -186,7 +220,6 @@ func GenEncryptionConfigHash(runtime *config.ControlRuntime) (string, error) {
 // GenReencryptHash generates a sha256 hash from the existing secrets keys and
 // any identity providers plus a new key based on the input arguments.
 func GenReencryptHash(runtime *config.ControlRuntime, keyName string) (string, error) {
-
 	// To retain compatibility with the older encryption hash format,
 	// we contruct the hash as: aescbc + secretbox + identity + newkey
 	currentKeys, err := GetEncryptionKeys(runtime)
@@ -309,7 +342,7 @@ func GetEncryptionConfigMetrics(runtime *config.ControlRuntime, initialMetrics b
 		}
 
 		reader := bytes.NewReader(data)
-		var parser expfmt.TextParser
+		parser := expfmt.NewTextParser(model.UTF8Validation)
 		mf, err := parser.TextToMetricFamilies(reader)
 		if err != nil {
 			return true, err
@@ -335,7 +368,7 @@ func GetEncryptionConfigMetrics(runtime *config.ControlRuntime, initialMetrics b
 
 		unixUpdateTime = int64(tsMetric.GetMetric()[0].GetGauge().GetValue())
 		if time.Now().Unix() < unixUpdateTime {
-			return true, fmt.Errorf("encryption reload time is incorrectly ahead of current time")
+			return true, errors.New("encryption reload time is incorrectly ahead of current time")
 		}
 
 		for _, totalMetric := range totalMetrics.GetMetric() {
