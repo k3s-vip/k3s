@@ -15,7 +15,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/libp2p/go-libp2p/core/peer"
 	pkgerrors "github.com/pkg/errors"
-	"github.com/rancher/wrangler/v3/pkg/merr"
+	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/sirupsen/logrus"
 	"github.com/spegel-org/spegel/pkg/routing"
 	"golang.org/x/sync/errgroup"
@@ -116,7 +116,7 @@ func (c *agentBootstrapper) Run(ctx context.Context, id peer.AddrInfo) error {
 		return pkgerrors.WithMessage(err, "failed to create kubernetes client")
 	}
 
-	go wait.PollUntilContextCancel(ctx, 1*time.Second, true, func(ctx context.Context) (bool, error) {
+	go wait.PollImmediateUntilWithContext(ctx, 1*time.Second, func(ctx context.Context) (bool, error) {
 		nodeName := os.Getenv("NODE_NAME")
 		if nodeName == "" {
 			return false, nil

@@ -10,7 +10,7 @@ import (
 	"github.com/k3s-io/kine/pkg/endpoint"
 	"github.com/otiai10/copy"
 	pkgerrors "github.com/pkg/errors"
-	"github.com/rancher/wrangler/v3/pkg/merr"
+	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/sirupsen/logrus"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
