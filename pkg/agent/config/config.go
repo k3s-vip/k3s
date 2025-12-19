@@ -34,7 +34,7 @@ import (
 	pkgerrors "github.com/pkg/errors"
 	certutil "github.com/rancher/dynamiclistener/cert"
 	"github.com/rancher/wharfie/pkg/registries"
-	"github.com/rancher/wrangler/v3/pkg/slice"
+	"github.com/rancher/wrangler/pkg/slice"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -83,7 +83,7 @@ func KubeProxyDisabled(ctx context.Context, node *config.Node, proxy proxy.Proxy
 	var disabled bool
 	var err error
 
-	_ = wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+	_ = wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
 		disabled, err = getKubeProxyDisabled(ctx, node, proxy)
 		if err != nil {
 			logrus.Infof("Waiting to retrieve kube-proxy configuration; server is not ready: %v", err)
@@ -102,7 +102,7 @@ func WaitForAPIServers(ctx context.Context, node *config.Node, proxy proxy.Proxy
 	var info *clientaccess.Info
 	var err error
 
-	_ = wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+	_ = wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
 		if info == nil {
 			withCert := clientaccess.WithClientCertificate(node.AgentConfig.ClientKubeletCert, node.AgentConfig.ClientKubeletKey)
 			info, err = clientaccess.ParseAndValidateToken(proxy.SupervisorURL(), node.Token, withCert)
