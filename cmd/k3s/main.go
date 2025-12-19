@@ -21,7 +21,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/untar"
 	"github.com/k3s-io/k3s/pkg/version"
 	pkgerrors "github.com/pkg/errors"
-	"github.com/rancher/wrangler/v3/pkg/resolvehome"
+	"github.com/rancher/wrangler/pkg/resolvehome"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
 	"github.com/urfave/cli/v2"

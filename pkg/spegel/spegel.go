@@ -325,7 +325,7 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 	}
 
 	// Wait up to 5 seconds for the p2p network to find peers.
-	if err := wait.PollUntilContextTimeout(ctx, time.Second, resolveTimeout, true, func(ctx context.Context) (bool, error) {
+	if err := wait.PollImmediateWithContext(ctx, time.Second, resolveTimeout, func(ctx context.Context) (bool, error) {
 		ready, _ := c.Ready(ctx)
 		return ready, nil
 	}); err != nil {

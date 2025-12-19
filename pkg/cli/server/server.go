@@ -647,7 +647,7 @@ func validateNetworkConfiguration(serverConfig server.Config) error {
 func pollAPIAddressFromEtcd(ctx context.Context, serverConfig server.Config, agentConfig cmds.Agent) {
 	defer close(agentConfig.APIAddressCh)
 	pollDuration := time.Second * 5
-	wait.PollUntilContextCancel(ctx, pollDuration, true, func(ctx context.Context) (bool, error) {
+	wait.PollImmediateUntilWithContext(ctx, pollDuration, func(ctx context.Context) (bool, error) {
 		ctx, cancel := context.WithTimeout(ctx, pollDuration)
 		defer cancel()
 		serverAddresses, err := etcd.GetAPIServerURLsFromETCD(ctx, &serverConfig.ControlConfig)

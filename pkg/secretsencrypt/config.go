@@ -294,7 +294,7 @@ func WaitForEncryptionConfigReload(runtime *config.ControlRuntime, reloadSuccess
 	var lastFailure string
 
 	ctx := context.Background()
-	err := wait.PollUntilContextTimeout(ctx, 5*time.Second, 120*time.Second, true, func(ctx context.Context) (bool, error) {
+	err := wait.PollImmediateWithContext(ctx, 5*time.Second, 120*time.Second, func(ctx context.Context) (bool, error) {
 		newReloadTime, newReloadSuccess, err := GetEncryptionConfigMetrics(runtime, false)
 		if err != nil {
 			return true, err
@@ -335,7 +335,7 @@ func GetEncryptionConfigMetrics(runtime *config.ControlRuntime, initialMetrics b
 	// This is wrapped in a poller because on startup no metrics exist. Its only after the encryption config
 	// is modified and the first reload occurs that the metrics are available.
 	ctx := context.Background()
-	err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 120*time.Second, true, func(ctx context.Context) (bool, error) {
+	err = wait.PollImmediateWithContext(ctx, 5*time.Second, 120*time.Second, func(ctx context.Context) (bool, error) {
 		data, err := restClient.Get().AbsPath("/metrics").DoRaw(ctx)
 		if err != nil {
 			return true, err

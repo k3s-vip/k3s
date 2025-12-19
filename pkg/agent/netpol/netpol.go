@@ -70,7 +70,7 @@ func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error
 	// Wait until the ready condition is updated and the uninitialized taint has
 	// been removed, at which point the addresses should be synced.
 	startTime := time.Now().Truncate(time.Second)
-	if err := wait.PollUntilContextTimeout(ctx, 2*time.Second, util.DefaultAPIServerReadyTimeout, true, func(ctx context.Context) (bool, error) {
+	if err := wait.PollImmediateWithContext(ctx, 2*time.Second, util.DefaultAPIServerReadyTimeout, func(ctx context.Context) (bool, error) {
 		var readyTime metav1.Time
 		// Get the node object
 		node, err := client.CoreV1().Nodes().Get(ctx, nodeConfig.AgentConfig.NodeName, metav1.GetOptions{})

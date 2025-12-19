@@ -91,7 +91,7 @@ func (c *Cluster) Start(ctx context.Context, wg *sync.WaitGroup) error {
 
 					if !c.config.EtcdDisableSnapshots {
 						// do an initial reconcile of snapshots with a fast retry until it succeeds
-						wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+						wait.PollImmediateUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
 							if err := c.managedDB.ReconcileSnapshotData(ctx); err != nil {
 								logrus.Errorf("Failed to record snapshots for cluster: %v", err)
 								return false, nil

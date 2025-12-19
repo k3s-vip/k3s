@@ -186,7 +186,7 @@ func (a *agentTunnel) startWatches(ctx context.Context, config *daemonconfig.Nod
 func (a *agentTunnel) setKubeletPort(ctx context.Context, rbacReady <-chan struct{}) {
 	<-rbacReady
 
-	wait.PollUntilContextTimeout(ctx, time.Second, util.DefaultAPIServerReadyTimeout, true, func(ctx context.Context) (bool, error) {
+	wait.PollImmediateWithContext(ctx, time.Second, util.DefaultAPIServerReadyTimeout, func(ctx context.Context) (bool, error) {
 		var readyTime metav1.Time
 		nodeName := os.Getenv("NODE_NAME")
 		node, err := a.client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})

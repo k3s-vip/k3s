@@ -32,7 +32,7 @@ import (
 	"github.com/flannel-io/flannel/pkg/trafficmngr/nftables"
 	"github.com/joho/godotenv"
 	pkgerrors "github.com/pkg/errors"
-	"github.com/rancher/wrangler/v3/pkg/merr"
+	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 

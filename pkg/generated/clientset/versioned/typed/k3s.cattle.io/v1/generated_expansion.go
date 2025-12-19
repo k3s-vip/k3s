@@ -6,6 +6,6 @@ Copyright The Kubernetes Authors.
 
 package v1
 
-type AddonExpansion interface{}
+type AddonExpansion any
 
-type ETCDSnapshotFileExpansion interface{}
+type ETCDSnapshotFileExpansion any

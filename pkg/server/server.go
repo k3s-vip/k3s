@@ -30,10 +30,10 @@ import (
 	"github.com/k3s-io/k3s/pkg/util/permissions"
 	"github.com/k3s-io/k3s/pkg/version"
 	pkgerrors "github.com/pkg/errors"
-	"github.com/rancher/wrangler/v3/pkg/apply"
-	v1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
-	"github.com/rancher/wrangler/v3/pkg/leader"
-	"github.com/rancher/wrangler/v3/pkg/resolvehome"
+	"github.com/rancher/wrangler/pkg/apply"
+	v1 "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
+	"github.com/rancher/wrangler/pkg/leader"
+	"github.com/rancher/wrangler/pkg/resolvehome"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -552,7 +552,7 @@ func setNodeLabelsAndAnnotations(ctx context.Context, nodes v1.NodeClient, confi
 	}
 
 	patcher := util.NewPatcher[*corev1.Node](nodes)
-	return wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+	return wait.PollImmediateUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
 		nodeName := os.Getenv("NODE_NAME")
 		if nodeName == "" {
 			logrus.Info("Waiting for control-plane node agent startup")

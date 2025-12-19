@@ -30,7 +30,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	pkgerrors "github.com/pkg/errors"
 	"github.com/rancher/wharfie/pkg/tarfile"
-	"github.com/rancher/wrangler/v3/pkg/merr"
+	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/sirupsen/logrus"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )

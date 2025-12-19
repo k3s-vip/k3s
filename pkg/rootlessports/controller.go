@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/k3s-io/k3s/pkg/rootless"
-	corev1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
+	corev1 "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
 	"github.com/rootless-containers/rootlesskit/v2/pkg/api/client"
 	"github.com/rootless-containers/rootlesskit/v2/pkg/port"
 	"github.com/sirupsen/logrus"

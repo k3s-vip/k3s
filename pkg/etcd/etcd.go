@@ -36,8 +36,8 @@ import (
 	"github.com/k3s-io/kine/pkg/endpoint"
 	pkgerrors "github.com/pkg/errors"
 	certutil "github.com/rancher/dynamiclistener/cert"
-	controllerv1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
-	"github.com/rancher/wrangler/v3/pkg/start"
+	controllerv1 "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
+	"github.com/rancher/wrangler/pkg/start"
 	"github.com/robfig/cron/v3"
 	"github.com/sirupsen/logrus"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -348,7 +348,7 @@ func (e *ETCD) Reset(ctx context.Context, wg *sync.WaitGroup, rebootstrap func()
 				return
 			}
 		}
-		wait.PollUntilContextCancel(ctx, time.Second*5, true, func(ctx context.Context) (bool, error) {
+		wait.PollImmediateUntilWithContext(ctx, time.Second*5, func(ctx context.Context) (bool, error) {
 			if err := e.Test(ctx, true); err == nil {
 				// reset the apiaddresses to nil since we are doing a restoration
 				if _, err := e.client.Put(ctx, AddressKey, ""); err != nil {
@@ -512,7 +512,7 @@ func (e *ETCD) Start(ctx context.Context, wg *sync.WaitGroup, clientAccessInfo *
 // pollJoin retries the etcd cluster join operation, handling the various
 // non-fatal error conditions that may be preventing it from joining.
 func (e *ETCD) pollJoin(ctx context.Context, wg *sync.WaitGroup, clientAccessInfo *clientaccess.Info) {
-	if err := wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+	if err := wait.PollImmediateUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
 		if err := e.join(ctx, wg, clientAccessInfo); err != nil {
 			// Retry the join if waiting for another member to be promoted, or waiting for peers to connect after promotion
 			if errors.Is(err, rpctypes.ErrTooManyLearners) || errors.Is(err, rpctypes.ErrUnhealthy) {
