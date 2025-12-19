@@ -11,8 +11,8 @@ import (
 
 	"github.com/k3s-io/k3s/pkg/signals"
 	pkgerrors "github.com/pkg/errors"
-	"github.com/rancher/wrangler/v3/pkg/merr"
-	"github.com/rancher/wrangler/v3/pkg/schemes"
+	"github.com/rancher/wrangler/pkg/merr"
+	"github.com/rancher/wrangler/pkg/schemes"
 	"github.com/sirupsen/logrus"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	v1 "k8s.io/api/core/v1"
@@ -106,7 +106,7 @@ func WaitForAPIServerReady(ctx context.Context, kubeconfigPath string, timeout t
 		return err
 	}
 
-	err = wait.PollUntilContextTimeout(ctx, time.Second*2, timeout, true, func(ctx context.Context) (bool, error) {
+	err = wait.PollImmediateWithContext(ctx, time.Second*2, timeout, func(ctx context.Context) (bool, error) {
 		// DoRaw returns an error if the response code is < 200 OK or > 206 Partial Content
 		if _, err := restClient.Get().AbsPath("/readyz").Param("verbose", "").DoRaw(ctx); err != nil {
 			if err.Error() != lastErr.Error() {
@@ -169,7 +169,7 @@ func WaitForRBACReady(ctx context.Context, kubeconfigPath string, timeout time.D
 		reviewFunc = subjectAccessReview(authClient, ra, user, groups)
 	}
 
-	err = wait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+	err = wait.PollImmediateWithContext(ctx, time.Second, timeout, func(ctx context.Context) (bool, error) {
 		status, rerr := reviewFunc(ctx)
 		if rerr != nil {
 			lastErr = rerr

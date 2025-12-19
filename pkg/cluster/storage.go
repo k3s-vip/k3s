@@ -202,7 +202,7 @@ func (c *Cluster) storageBootstrap(ctx context.Context) error {
 
 	attempts := 0
 	tokenKey := storageKey(normalizedToken)
-	return wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+	return wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
 		attempts++
 
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -278,7 +278,7 @@ func getBootstrapValues(ctx context.Context, storageClient store.ReadCloser) ([]
 	var bootstrapList []mvccpb.KeyValue
 	var err error
 
-	if err := wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+	if err := wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
 		operationCtx, operationCancel := context.WithTimeout(ctx, 10*time.Second)
 		defer operationCancel()
 
