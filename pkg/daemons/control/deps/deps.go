@@ -538,15 +538,15 @@ type signedCertFactory = func(commonName string, organization []string, certFile
 
 func createServerSigningCertKey(config *config.Control) (bool, error) {
 	runtime := config.Runtime
-	TokenCA := filepath.Join(config.DataDir, "tls", "token-ca.crt")
-	TokenCAKey := filepath.Join(config.DataDir, "tls", "token-ca.key")
+	tokenCA := filepath.Join(config.DataDir, "tls", "token-ca.crt")
+	tokenCAKey := filepath.Join(config.DataDir, "tls", "token-ca.key")
 
-	if exists(TokenCA, TokenCAKey) && !exists(runtime.ServerCA) && !exists(runtime.ServerCAKey) {
+	if exists(tokenCA, tokenCAKey) && !exists(runtime.ServerCA) && !exists(runtime.ServerCAKey) {
 		logrus.Infof("Upgrading token-ca files to server-ca")
-		if err := os.Link(TokenCA, runtime.ServerCA); err != nil {
+		if err := os.Link(tokenCA, runtime.ServerCA); err != nil {
 			return false, err
 		}
-		if err := os.Link(TokenCAKey, runtime.ServerCAKey); err != nil {
+		if err := os.Link(tokenCAKey, runtime.ServerCAKey); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -774,7 +774,7 @@ func genEncryptionConfigAndState(controlConfig *config.Control) error {
 	case secretsencrypt.SecretBoxProvider:
 		keyName = "secretboxkey"
 	default:
-		return fmt.Errorf("unsupported secrets-encryption-key-type %s", controlConfig.EncryptProvider)
+		return fmt.Errorf("unsupported secrets-encryption-provider %s", controlConfig.EncryptProvider)
 	}
 	if s, err := os.Stat(runtime.EncryptionConfig); err == nil && s.Size() > 0 {
 		// On upgrade from older versions, the encryption hash may not exist, create it
@@ -801,7 +801,8 @@ func genEncryptionConfigAndState(controlConfig *config.Control) error {
 		},
 	}
 	var provider []apiserverconfigv1.ProviderConfiguration
-	if controlConfig.EncryptProvider == secretsencrypt.AESCBCProvider {
+	switch controlConfig.EncryptProvider {
+	case secretsencrypt.AESCBCProvider:
 		provider = []apiserverconfigv1.ProviderConfiguration{
 			{
 				AESCBC: &apiserverconfigv1.AESConfiguration{
@@ -812,7 +813,7 @@ func genEncryptionConfigAndState(controlConfig *config.Control) error {
 				Identity: &apiserverconfigv1.IdentityConfiguration{},
 			},
 		}
-	} else if controlConfig.EncryptProvider == secretsencrypt.SecretBoxProvider {
+	case secretsencrypt.SecretBoxProvider:
 		provider = []apiserverconfigv1.ProviderConfiguration{
 			{
 				Secretbox: &apiserverconfigv1.SecretboxConfiguration{

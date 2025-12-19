@@ -33,7 +33,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/utils/lru"
 )
 
 var (
@@ -65,7 +64,7 @@ type Controller struct {
 	tokenHash   string
 	nodeName    string
 	core        core.Interface
-	clientCache *lru.Cache
+	clientCache *util.Cache[*Client]
 }
 
 // Client holds state for a given configuration - a preconfigured minio client,
@@ -83,7 +82,7 @@ type Client struct {
 func Start(ctx context.Context, config *config.Control) (*Controller, error) {
 	once.Do(func() {
 		c := &Controller{
-			clientCache: lru.New(5),
+			clientCache: util.NewCache[*Client](5),
 			nodeName:    os.Getenv("NODE_NAME"),
 		}
 
@@ -92,7 +91,7 @@ func Start(ctx context.Context, config *config.Control) (*Controller, error) {
 			controller = c
 		} else {
 			logrus.Debug("Getting S3 snapshot cluster ID and server token hash")
-			if err := wait.PollImmediateUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
+			if err := wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
 				if config.Runtime.Core == nil {
 					return false, nil
 				}
@@ -161,7 +160,7 @@ func (c *Controller) GetClient(ctx context.Context, etcdS3 *config.EtcdS3) (*Cli
 	// print the endpoint and bucket name to avoid leaking creds into the logs.
 	if client, ok := c.clientCache.Get(*etcdS3); ok {
 		logrus.Infof("Reusing cached S3 client for endpoint=%q bucket=%q folder=%q", scheme+etcdS3.Endpoint, etcdS3.Bucket, etcdS3.Folder)
-		return client.(*Client), nil
+		return client, nil
 	}
 	logrus.Infof("Attempting to create new S3 client for endpoint=%q bucket=%q folder=%q", scheme+etcdS3.Endpoint, etcdS3.Bucket, etcdS3.Folder)
 
@@ -201,7 +200,7 @@ func (c *Controller) GetClient(ctx context.Context, etcdS3 *config.EtcdS3) (*Cli
 				return nil, pkgerrors.WithMessage(err, "failed to parse etcd-s3-proxy value as URL")
 			}
 			if u.Scheme == "" || u.Host == "" {
-				return nil, fmt.Errorf("proxy URL must include scheme and host")
+				return nil, errors.New("proxy URL must include scheme and host")
 			}
 		}
 		tr.Proxy = http.ProxyURL(u)

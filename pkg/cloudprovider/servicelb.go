@@ -3,6 +3,7 @@ package cloudprovider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -201,7 +202,7 @@ func (k *k3s) processNextWorkItem() bool {
 
 // processSingleItem processes a single item from the work queue,
 // requeueing it if the handler fails.
-func (k *k3s) processSingleItem(obj interface{}) error {
+func (k *k3s) processSingleItem(obj any) error {
 	var (
 		key string
 		ok  bool
@@ -222,7 +223,6 @@ func (k *k3s) processSingleItem(obj interface{}) error {
 
 	k.workqueue.Forget(obj)
 	return nil
-
 }
 
 // updateServiceStatus updates the load balancer status for the matching service, if it exists and is a
@@ -490,11 +490,6 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 					SecurityContext:              securityContext,
 					Tolerations: []core.Toleration{
 						{
-							Key:      util.MasterRoleLabelKey,
-							Operator: "Exists",
-							Effect:   "NoSchedule",
-						},
-						{
 							Key:      util.ControlPlaneRoleLabelKey,
 							Operator: "Exists",
 							Effect:   "NoSchedule",
@@ -740,11 +735,11 @@ func validateToleration(toleration *core.Toleration) error {
 	}
 
 	if toleration.Key == "" && toleration.Operator != core.TolerationOpExists {
-		return fmt.Errorf("toleration with empty key must have operator 'Exists'")
+		return errors.New("toleration with empty key must have operator 'Exists'")
 	}
 
 	if toleration.Operator == core.TolerationOpExists && toleration.Value != "" {
-		return fmt.Errorf("toleration with operator 'Exists' must have an empty value")
+		return errors.New("toleration with operator 'Exists' must have an empty value")
 	}
 
 	return nil

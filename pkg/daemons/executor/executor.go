@@ -54,6 +54,7 @@ type ETCDSocketOpts struct {
 	ReusePort    bool `json:"reuse-port,omitempty"`
 }
 
+//revive:disable:struct-tag
 type ETCDConfig struct {
 	InitialOptions       `json:",inline"`
 	Name                 string         `json:"name,omitempty"`
@@ -105,7 +106,7 @@ func (e ETCDConfig) ToConfigFile(extraArgs []string) (string, error) {
 	}
 
 	if len(extraArgs) > 0 {
-		var s map[string]interface{}
+		var s map[string]any
 		if err := yaml2.Unmarshal(bytes, &s); err != nil {
 			return "", err
 		}
