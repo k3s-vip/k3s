@@ -35,7 +35,6 @@ import (
 	cloudprovider "k8s.io/cloud-provider"
 	ccmapp "k8s.io/cloud-provider/app"
 	cloudcontrollerconfig "k8s.io/cloud-provider/app/config"
-	"k8s.io/cloud-provider/names"
 	ccmopt "k8s.io/cloud-provider/options"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
@@ -136,6 +135,8 @@ func (e *Embedded) Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node,
 					logrus.Warn("VPN provider overrides node-external-ip parameter")
 				}
 				nodeIPs = vpnIPs
+				nodeConfig.AgentConfig.NodeIPs = vpnIPs
+				nodeConfig.AgentConfig.NodeIP = vpnIPs[0].String()
 				nodeConfig.Flannel.Iface, err = net.InterfaceByName(vpnInfo.Interface)
 				if err != nil {
 					return pkgerrors.WithMessagef(err, "unable to find vpn interface: %s", vpnInfo.Interface)
@@ -236,7 +237,7 @@ func (e *Embedded) APIServer(ctx context.Context, args []string) error {
 }
 
 func (e *Embedded) Scheduler(ctx context.Context, nodeReady <-chan struct{}, args []string) error {
-	command := sapp.NewSchedulerCommand(ctx.Done())
+	command := sapp.NewSchedulerCommand()
 	command.SetArgs(args)
 
 	go func() {
@@ -295,13 +296,11 @@ func (*Embedded) CloudControllerManager(ctx context.Context, ccmRBACReady <-chan
 		return cloud
 	}
 
-	controllerAliases := names.CCMControllerAliases()
 
 	command := ccmapp.NewCloudControllerManagerCommand(
 		ccmOptions,
 		cloudInitializer,
 		ccmapp.DefaultInitFuncConstructors,
-		controllerAliases,
 		cliflag.NamedFlagSets{},
 		ctx.Done())
 	command.SetArgs(args)

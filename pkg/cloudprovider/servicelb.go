@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"sigs.k8s.io/yaml"
-
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/rancher/wrangler/v3/pkg/condition"
@@ -30,10 +28,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/cloud-provider/names"
+	"k8s.io/cloud-provider/app"
 	servicehelper "k8s.io/cloud-provider/service/helpers"
 	utilsnet "k8s.io/utils/net"
 	utilsptr "k8s.io/utils/ptr"
+	"sigs.k8s.io/yaml"
 )
 
 var (
@@ -45,7 +44,7 @@ var (
 	nodeSelectorLabel      = "svccontroller." + version.Program + ".cattle.io/nodeselector"
 	priorityAnnotation     = "svccontroller." + version.Program + ".cattle.io/priorityclassname"
 	tolerationsAnnotation  = "svccontroller." + version.Program + ".cattle.io/tolerations"
-	controllerName         = names.ServiceLBController
+	controllerName         = app.DefaultInitFuncConstructors["service"].InitContext.ClientName
 )
 
 const (
@@ -557,7 +556,7 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 					Name: "DEST_IPS",
 					ValueFrom: &core.EnvVarSource{
 						FieldRef: &core.ObjectFieldSelector{
-							FieldPath: "status.hostIPs",
+							FieldPath: "status.hostIP",
 						},
 					},
 				},
