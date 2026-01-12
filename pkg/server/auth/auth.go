@@ -10,7 +10,6 @@ import (
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
-	"k8s.io/apiserver/pkg/apis/apiserver"
 	genericapifilters "k8s.io/apiserver/pkg/endpoints/filters"
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/server"
@@ -98,9 +97,7 @@ func Delegated(clientCA, kubeConfig string, config *server.Config) mux.Middlewar
 	}
 
 	authn := options.NewDelegatingAuthenticationOptions()
-	authn.Anonymous = &apiserver.AnonymousAuthConfig{
-		Enabled: false,
-	}
+	authn.DisableAnonymous = true
 	authn.SkipInClusterLookup = true
 	authn.ClientCert = options.ClientCertAuthenticationOptions{
 		ClientCA: clientCA,

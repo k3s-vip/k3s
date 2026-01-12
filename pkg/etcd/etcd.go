@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
@@ -732,7 +731,7 @@ func (e *ETCD) setName(force bool) error {
 		if e.config.ServerNodeName == "" {
 			return errors.New("server node name not set")
 		}
-		e.name = e.config.ServerNodeName + "-" + uuid.New().String()[:8]
+		e.name = e.EndpointName() + strings.ReplaceAll(e.address, ".", "-")
 		if err := os.MkdirAll(filepath.Dir(fileName), 0700); err != nil {
 			return err
 		}
