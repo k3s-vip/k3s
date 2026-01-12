@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/opencontainers/cgroups"
+	"github.com/opencontainers/runc/libcontainer/cgroups"
 	pkgerrors "github.com/pkg/errors"
 	"github.com/rootless-containers/rootlesskit/v2/pkg/child"
 	"github.com/rootless-containers/rootlesskit/v2/pkg/copyup/tmpfssymlink"
