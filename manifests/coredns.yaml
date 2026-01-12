@@ -53,6 +53,8 @@ metadata:
   namespace: kube-system
 data:
   Corefile: |
+    # File managed by k3s. DO NOT EDIT.
+    # See: https://docs.k3s.io/advanced#coredns-custom-configuration-imports
     .:53 {
         errors
         health
@@ -106,9 +108,6 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
-        - key: "node-role.kubernetes.io/master"
-          operator: "Exists"
-          effect: "NoSchedule"
       nodeSelector:
         kubernetes.io/os: linux
       topologySpreadConstraints:
@@ -126,7 +125,7 @@ spec:
               k8s-app: kube-dns
       containers:
       - name: coredns
-        image: "%{SYSTEM_DEFAULT_REGISTRY}%rancher/mirrored-coredns-coredns:1.14.2"
+        image: "%{SYSTEM_DEFAULT_REGISTRY}%coredns/coredns:1.15.0"
         imagePullPolicy: IfNotPresent
         resources:
           limits:

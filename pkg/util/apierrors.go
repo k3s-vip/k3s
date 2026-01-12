@@ -7,7 +7,7 @@ import (
 	"math/big"
 	"net/http"
 
-	"github.com/k3s-io/api/pkg/generated/clientset/versioned/scheme"
+	"github.com/k3s-io/k3s/pkg/generated/clientset/versioned/scheme"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,7 +39,7 @@ func SendError(err error, resp http.ResponseWriter, req *http.Request, status ..
 	}
 
 	// Don't log "apiserver not ready" or "apiserver disabled" errors, they are frequent during startup
-	if !errors.Is(err, ErrAPINotReady) && !errors.Is(err, ErrAPIDisabled) {
+	if !errors.Is(err, ErrAPINotReady) && !errors.Is(err, ErrAPIDisabled) && !errors.Is(err, ErrCoreNotReady) {
 		logrus.Errorf("Sending %s %d response to %s: %v", req.Proto, code, req.RemoteAddr, err)
 	}
 

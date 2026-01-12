@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/go-logr/logr"
@@ -86,4 +87,20 @@ func (ls *LogrusSink) WithName(name string) logr.LogSink {
 		name = fmt.Sprintf("%s/%s", base, name)
 	}
 	return ls.WithValues("logger", name)
+}
+
+type LogOption func(logger logr.Logger) logr.Logger
+
+func NewContext(ctx context.Context, name string, opts ...LogOption) context.Context {
+	logger, err := logr.FromContext(ctx)
+	if err != nil {
+		logger = NewLogrusSink(nil).AsLogr()
+	}
+	if name != "" {
+		logger = logger.WithName(name)
+	}
+	for _, opt := range opts {
+		logger = opt(logger)
+	}
+	return logr.NewContext(ctx, logger)
 }
