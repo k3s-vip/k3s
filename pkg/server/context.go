@@ -3,12 +3,12 @@ package server
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
-	k3scrds "github.com/k3s-io/api/pkg/crds"
-	"github.com/k3s-io/api/pkg/generated/controllers/k3s.cattle.io"
-	helmcrds "github.com/k3s-io/helm-controller/pkg/crds"
 	"github.com/k3s-io/helm-controller/pkg/generated/controllers/helm.cattle.io"
+	addoncrd "github.com/k3s-io/k3s/pkg/crds"
+	"github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/rancher/wrangler/v3/pkg/crd"
@@ -91,22 +91,14 @@ func NewContext(ctx context.Context, config *Config) (*Context, error) {
 	return c, nil
 }
 
-type crdLister func() ([]*apiextv1.CustomResourceDefinition, error)
-
 func (c *Context) registerCRDs(ctx context.Context) error {
-	listers := []crdLister{k3scrds.List}
-	if c.Helm != nil {
-		listers = append(listers, helmcrds.List)
+	crds, err := addoncrd.List()
+	if err != nil {
+		return fmt.Errorf("failed to get CRDs %v", err)
 	}
-
-	crds := []*apiextv1.CustomResourceDefinition{}
-	for _, list := range listers {
-		l, err := list()
-		if err != nil {
-			return fmt.Errorf("failed to get CRDs from %s: %v", util.GetFunctionName(list), err)
-		}
-		crds = append(crds, l...)
-	}
+	crds = slices.DeleteFunc(crds, func(crd *apiextv1.CustomResourceDefinition) bool {
+		return crd.Spec.Group == "helm.cattle.io" && c.Helm == nil
+	})
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		return crd.BatchCreateCRDs(ctx, c.Ext.ApiextensionsV1().CustomResourceDefinitions(), nil, time.Minute, crds)
