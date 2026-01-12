@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
@@ -14,16 +15,13 @@ import (
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/k3s-io/k3s/pkg/vpn"
 	"github.com/sirupsen/logrus"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
-	toolscache "k8s.io/client-go/tools/cache"
-	toolswatch "k8s.io/client-go/tools/watch"
 	utilsnet "k8s.io/utils/net"
 )
 
@@ -33,26 +31,37 @@ const (
 	"EnableIPv6": %IPV6_ENABLED%,
 	"EnableIPv4": %IPV4_ENABLED%,
 	"IPv6Network": "%CIDR_IPV6%",
-	"Backend": %backend%
+	"Backend": %BACKEND%
 }
 `
 
 	hostGWBackend = `{
-	"Type": "host-gw"
-}`
+		"Type": "host-gw"
+	}`
 
 	tailscaledBackend = `{
-	"Type": "extension",
-	"PostStartupCommand": "tailscale set --accept-routes --advertise-routes=%Routes%",
-	"ShutdownCommand": "tailscale down"
-}`
+		"Type": "extension",
+		"PostStartupCommand": "tailscale set --accept-routes --advertise-routes=%ROUTES%",
+		"ShutdownCommand": "tailscale down"
+	}`
 
 	wireguardNativeBackend = `{
-	"Type": "wireguard",
-	"PersistentKeepaliveInterval": 25
-}`
+		"Type": "wireguard",
+		"PersistentKeepaliveInterval": 25
+	}`
+
+	vxlanBackend = `{
+		"Type": "vxlan",
+		"VNI": %VXLAN_VNI%,
+		"Port": %VXLAN_PORT%
+	}`
 
 	emptyIPv6Network = "::/0"
+)
+
+var (
+	vxlanPortEnv = version.ProgramUpper + "_FLANNEL_VXLAN_PORT"
+	vxlanVniEnv  = version.ProgramUpper + "_FLANNEL_VXLAN_VNI"
 )
 
 type netMode int
@@ -127,15 +136,7 @@ func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error
 
 // waitForPodCIDR watches nodes with this node's name, and returns when the PodCIDR has been set.
 func waitForPodCIDR(ctx context.Context, nodeName string, coreClient kubernetes.Interface) error {
-	lw := toolscache.NewListWatchFromClient(coreClient.CoreV1().RESTClient(), "nodes", metav1.NamespaceNone, fields.OneTermEqualSelector(metav1.ObjectNameField, nodeName))
-	condition := func(ev watch.Event) (bool, error) {
-		if n, ok := ev.Object.(*v1.Node); ok {
-			return n.Spec.PodCIDR != "", nil
-		}
-		return false, errors.New("event object not of type v1.Node")
-	}
-
-	if _, err := toolswatch.UntilWithSync(ctx, lw, &v1.Node{}, nil, condition); err != nil {
+	if err := util.WaitForNode(ctx, coreClient, nodeName, func(node *v1.Node) (bool, error) { return node.Spec.PodCIDR != "", nil }); err != nil {
 		return errors.WithMessage(err, "failed to wait for PodCIDR assignment")
 	}
 
@@ -184,6 +185,14 @@ func createFlannelConf(nodeConfig *config.Node) error {
 		logrus.Fatalf("Flannel error checking netMode: %v", err)
 		return err
 	}
+
+	for _, env := range nodeConfig.Flannel.BackendEnv {
+		if strings.HasPrefix(env, version.ProgramUpper+"_FLANNEL_") {
+			k, v, _ := strings.Cut(env, "=")
+			os.Setenv(k, v)
+		}
+	}
+
 	confJSON := flannelConf
 	if nm.IPv4Enabled() {
 		confJSON = strings.ReplaceAll(confJSON, "%IPV4_ENABLED%", "true")
@@ -229,7 +238,7 @@ func createFlannelConf(nodeConfig *config.Node) error {
 
 	switch nodeConfig.Flannel.Backend {
 	case BackendVXLAN:
-		backendConf = vxlanBackend
+		backendConf = renderVXLAN()
 	case BackendHostGW:
 		backendConf = hostGWBackend
 	case BackendTailscale:
@@ -249,13 +258,13 @@ func createFlannelConf(nodeConfig *config.Node) error {
 				routes = append(routes, advertisedRoute.String())
 			}
 		}
-		backendConf = strings.ReplaceAll(tailscaledBackend, "%Routes%", strings.Join(routes, ","))
+		backendConf = strings.ReplaceAll(tailscaledBackend, "%ROUTES%", strings.Join(routes, ","))
 	case BackendWireguardNative:
 		backendConf = wireguardNativeBackend
 	default:
 		return fmt.Errorf("Cannot configure unknown flannel backend '%s'", nodeConfig.Flannel.Backend)
 	}
-	confJSON = strings.ReplaceAll(confJSON, "%backend%", backendConf)
+	confJSON = strings.ReplaceAll(confJSON, "%BACKEND%", backendConf)
 
 	logrus.Debugf("The flannel configuration is %s", confJSON)
 	return agentutil.WriteFile(nodeConfig.Flannel.ConfFile, confJSON)
@@ -310,4 +319,9 @@ func syncAnnotations(ctx context.Context, nodeConfig *config.Node, coreClient ku
 	}
 	_, err = patcher.Patch(ctx, patch, nodeConfig.AgentConfig.NodeName)
 	return err
+}
+
+func renderVXLAN() string {
+	backend := strings.ReplaceAll(vxlanBackend, "%VXLAN_VNI%", os.Getenv(vxlanVniEnv))
+	return strings.ReplaceAll(backend, "%VXLAN_PORT%", os.Getenv(vxlanPortEnv))
 }
