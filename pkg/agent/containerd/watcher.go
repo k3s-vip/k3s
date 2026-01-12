@@ -31,7 +31,7 @@ type watchqueue struct {
 	cfg        *config.Node
 	watcher    *fsnotify.Watcher
 	filesCache map[string]*fileInfo
-	workqueue  workqueue.TypedDelayingInterface[string]
+	workqueue  workqueue.DelayingInterface
 }
 
 func createWatcher(path string) (*fsnotify.Watcher, error) {
@@ -110,8 +110,18 @@ func (w *watchqueue) processNextEventForImages(ctx context.Context, client *cont
 }
 
 // processImageEvent processes a single item from the workqueue.
-func (w *watchqueue) processImageEvent(ctx context.Context, key string, client *containerd.Client, imageClient runtimeapi.ImageServiceClient) error {
-	defer w.workqueue.Done(key)
+func (w *watchqueue) processImageEvent(ctx context.Context, obj any, client *containerd.Client, imageClient runtimeapi.ImageServiceClient) error {
+	var (
+		key string
+		ok  bool
+	)
+
+	defer w.workqueue.Done(obj)
+
+	if key, ok = obj.(string); !ok {
+		logrus.Errorf("expected string in workqueue but got %#v", obj)
+		return nil
+	}
 
 	// Watch is rooted at the parent dir of the images dir, but we only need to handle things within the images dir
 	if !strings.HasPrefix(key, w.cfg.Images) {
@@ -281,7 +291,7 @@ func watchImages(ctx context.Context, cfg *config.Node) (*watchqueue, error) {
 		cfg:        cfg,
 		watcher:    watcher,
 		filesCache: make(map[string]*fileInfo),
-		workqueue:  workqueue.TypedNewDelayingQueue[string](),
+		workqueue:  workqueue.NewDelayingQueue(),
 	}
 	logrus.Debugf("Image import watcher created")
 

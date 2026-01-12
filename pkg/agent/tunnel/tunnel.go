@@ -529,12 +529,7 @@ func wrapListWithRefresh(ctx context.Context, lw *toolscache.ListWatch, refreshF
 			go refreshFunc(ctx)
 			return lw.ListFunc(options)
 		},
-		ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
-			go refreshFunc(ctx)
-			return lw.ListWithContextFunc(ctx, options)
-		},
-		WatchFunc:            lw.WatchFunc,
-		WatchFuncWithContext: lw.WatchFuncWithContext,
+		WatchFunc: lw.WatchFunc,
 	}
 }
 
