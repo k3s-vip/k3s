@@ -6,7 +6,7 @@ import (
 	"io"
 	"net/http"
 
-	k3s "github.com/k3s-io/api/k3s.cattle.io/v1"
+	k3s "github.com/k3s-io/k3s/pkg/apis/k3s.cattle.io/v1"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/util"
@@ -140,7 +140,7 @@ func (e *ETCD) handleInvalid(rw http.ResponseWriter, req *http.Request) error {
 	return nil
 }
 
-// withRequest returns a modified ETCD struct that is overriden
+// withRequest returns a modified ETCD struct that is overridden
 // with etcd snapshot config from the snapshot request.
 func (e *ETCD) withRequest(sr *SnapshotRequest) *ETCD {
 	re := &ETCD{
