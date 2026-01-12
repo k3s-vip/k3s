@@ -7,17 +7,18 @@ import (
 
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/sirupsen/logrus"
-	v1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/watch"
 	toolscache "k8s.io/client-go/tools/cache"
 	toolswatch "k8s.io/client-go/tools/watch"
 )
 
 func registerEndpointsHandlers(ctx context.Context, etcd *ETCD) {
-	lw := toolscache.NewListWatchFromClient(etcd.config.Runtime.K8s.CoreV1().RESTClient(), "endpoints", metav1.NamespaceDefault, fields.OneTermEqualSelector(metav1.ObjectNameField, "kubernetes"))
-	_, _, watch, done := toolswatch.NewIndexerInformerWatcher(lw, &v1.Endpoints{})
+	labelSelector := labels.Set{discoveryv1.LabelServiceName: "kubernetes"}.String()
+	lw := toolscache.NewFilteredListWatchFromClient(etcd.config.Runtime.K8s.DiscoveryV1().RESTClient(), "endpointslices", metav1.NamespaceDefault, func(options *metav1.ListOptions) { options.LabelSelector = labelSelector })
+	indexer, informer, watch, done := toolswatch.NewIndexerInformerWatcher(lw, &discoveryv1.EndpointSlice{})
 
 	go func() {
 		<-ctx.Done()
@@ -26,34 +27,47 @@ func registerEndpointsHandlers(ctx context.Context, etcd *ETCD) {
 	}()
 
 	h := &handler{
-		etcd:  etcd,
-		watch: watch,
+		etcd:     etcd,
+		indexer:  indexer,
+		informer: informer,
+		watch:    watch,
 	}
 
 	logrus.Infof("Starting managed etcd apiserver addresses controller")
-	go h.watchEndpoints(ctx)
+	go h.informer.Run(ctx.Done())
+	go h.watchEndpointSlice(ctx)
 }
 
 type handler struct {
-	etcd  *ETCD
-	watch watch.Interface
+	etcd     *ETCD
+	indexer  toolscache.Indexer
+	informer toolscache.Controller
+	watch    watch.Interface
 }
 
 // This controller will update the version.program/apiaddresses etcd key with a list of
-// api addresses endpoints found in the kubernetes service in the default namespace
-func (h *handler) watchEndpoints(ctx context.Context) {
+// api addresses endpoint slices found in the kubernetes service in the default namespace
+func (h *handler) watchEndpointSlice(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case ev, ok := <-h.watch.ResultChan():
-			endpoint, ok := ev.Object.(*v1.Endpoints)
-			if !ok {
-				logrus.Fatalf("Failed to watch apiserver addresses: could not convert event object to endpoint: %v", ev)
+		case <-h.watch.ResultChan():
+			if !h.informer.HasSynced() {
+				continue
+			}
+			objs := h.indexer.List()
+			eps := make([]discoveryv1.EndpointSlice, 0, len(objs))
+			for _, obj := range objs {
+				if ep, ok := obj.(*discoveryv1.EndpointSlice); ok {
+					eps = append(eps, *ep)
+				} else {
+					logrus.Warnf("Watch apiserver addresses: expected *discoveryv1.EndpointSlice, got %T", obj)
+				}
 			}
 
 			w := &bytes.Buffer{}
-			if err := json.NewEncoder(w).Encode(util.GetAddresses(endpoint)); err != nil {
+			if err := json.NewEncoder(w).Encode(util.GetAddressesFromSlices(eps...)); err != nil {
 				logrus.Warnf("Failed to encode apiserver addresses: %v", err)
 				continue
 			}

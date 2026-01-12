@@ -1,13 +1,9 @@
 #!/bin/bash
 
 GO=${GO-go}
-ARCH=${ARCH:-$("${GO}" env GOARCH)}
-OS=${OS:-$("${GO}" env GOOS)}
-SUFFIX="-${ARCH}"
+. ./scripts/platform.sh
 
-if [ -z "$NO_DAPPER" ]; then
-    . ./scripts/git_version.sh
-fi
+. ./scripts/git_version.sh
 
 get-module-version(){
   go list -mod=readonly -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $1
@@ -16,6 +12,11 @@ get-module-version(){
 get-module-path(){
   go list -mod=readonly -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{{end}}' $1
 }
+
+RUNC_DIR=build/src/github.com/opencontainers/runc
+CONTAINERD_DIR=build/src/github.com/containerd/containerd
+HCSSHIM_DIR=build/src/github.com/microsoft/hcsshim
+PLUGINS_DIR=build/src/github.com/containernetworking/plugins
 
 PKG_CONTAINERD_K3S=$(get-module-path github.com/containerd/containerd/v2)
 VERSION_CONTAINERD=$(get-module-version github.com/containerd/containerd/v2)
@@ -29,12 +30,12 @@ if [ -z "$VERSION_CRICTL" ]; then
 fi
 
 VERSION_K8S_K3S=$(get-module-version k8s.io/kubernetes)
-VERSION_K8S=${VERSION_K8S_K3S%-k3s*}
+VERSION_K8S=${VERSION_K8S_K3S%-*}
 if [ -z "$VERSION_K8S" ]; then
     VERSION_K8S="v0.0.0"
 fi
 
-VERSION_RUNC=$(get-module-version github.com/opencontainers/runc)
+VERSION_RUNC=v1.3.6-vip
 if [ -z "$VERSION_RUNC" ]; then
     VERSION_RUNC="v0.0.0"
 fi
@@ -54,20 +55,17 @@ if [ -z "$VERSION_CRI_DOCKERD" ]; then
   VERSION_CRI_DOCKERD="v0.0.0"
 fi
 
-VERSION_CNIPLUGINS="v1.9.1-k3s1"
-VERSION_FLANNEL_PLUGIN="v1.9.0-flannel1"
+VERSION_CNIPLUGINS="v1.9.1-vip9"
+VERSION_FLANNEL_PLUGIN="v1.9.1-flannel3"
 
 VERSION_KUBE_ROUTER=$(get-module-version github.com/cloudnativelabs/kube-router/v2)
 if [ -z "$VERSION_KUBE_ROUTER" ]; then
     VERSION_KUBE_ROUTER="v0.0.0"
 fi
 
-VERSION_ROOT="v0.15.0"
+VERSION_ROOT="v0.15.4"
 
-VERSION_HELM_JOB="v0.9.14-build20260309"
-
-DEPENDENCIES_URL="https://raw.githubusercontent.com/kubernetes/kubernetes/${VERSION_K8S}/build/dependencies.yaml"
-VERSION_GOLANG="go"$(curl -sL "${DEPENDENCIES_URL}" | yq e '.dependencies[] | select(.name == "golang: upstream version").version' -)
+VERSION_HELM_JOB=latest
 
 if [[ -n "$GIT_TAG" ]]; then
     if [[ ! "$GIT_TAG" =~ ^"$VERSION_K8S"[+-] ]]; then
@@ -79,8 +77,3 @@ else
     VERSION="$VERSION_K8S+k3s-${COMMIT:0:8}$DIRTY"
 fi
 VERSION_TAG="$(sed -e 's/+/-/g' <<< "$VERSION")"
-
-BINARY_POSTFIX=
-if [ ${OS} = windows ]; then
-    BINARY_POSTFIX=.exe
-fi
