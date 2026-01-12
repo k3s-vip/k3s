@@ -27,10 +27,13 @@ import (
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/k3s-io/k3s/pkg/vpn"
 	"github.com/sirupsen/logrus"
+	"github.com/urfave/cli/v2"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	cloudprovider "k8s.io/cloud-provider"
 	ccmapp "k8s.io/cloud-provider/app"
 	cloudcontrollerconfig "k8s.io/cloud-provider/app/config"
@@ -51,24 +54,91 @@ import (
 
 var once sync.Once
 
-func init() {
-	executor.Set(&Embedded{})
-}
-
 // explicit type check
 var _ executor.Executor = &Embedded{}
+var _ vpn.InfoProvider = &Embedded{}
 
 type Embedded struct {
-	apiServerReady <-chan struct{}
-	etcdReady      chan struct{}
-	criReady       chan struct{}
+	apiServerReady *wait.Chan
+	etcdReady      *wait.Chan
+	criReady       *wait.Chan
 	nodeConfig     *daemonconfig.Node
+	vpnInfo        *vpn.Info
+}
+
+// New creates a new embeded executor from the provided agent CLI config.
+// Optional components like VPN may modify settings provided by the CLI.
+func New(ctx context.Context, cfg *cmds.Agent) (*Embedded, error) {
+	// If there is a VPN, we must start it early to overwrite NodeIP and flannel interface
+	var vpnInfo *vpn.Info
+	var err error
+
+	if cfg.VPNAuthFile != "" {
+		cfg.VPNAuth, err = util.ReadFile(ctx, cfg.VPNAuthFile)
+		if err != nil {
+			return nil, errors.WithMessage(err, "failed to read vpn-auth-file")
+		}
+	}
+
+	if cfg.VPNAuth != "" {
+		err = vpn.StartVPN(cfg.VPNAuth)
+		if err != nil {
+			return nil, err
+		}
+
+		vpnInfo, err = vpn.GetInfo(cfg.VPNAuth)
+		if err != nil {
+			return nil, err
+		}
+
+		// Pass ipv4, ipv6 or both depending on nodeIPs mode
+		_, nodeIPs, err := util.GetHostnameAndIPs(ctx, cfg.NodeName, util.SplitStringSlice(cfg.NodeIP.Value()))
+		if err != nil {
+			return nil, err
+		}
+
+		var vpnIPs []net.IP
+		if utilsnet.IsIPv4(nodeIPs[0]) && vpnInfo.IPv4Address != nil {
+			vpnIPs = append(vpnIPs, vpnInfo.IPv4Address)
+			if vpnInfo.IPv6Address != nil {
+				vpnIPs = append(vpnIPs, vpnInfo.IPv6Address)
+			}
+		} else if utilsnet.IsIPv6(nodeIPs[0]) && vpnInfo.IPv6Address != nil {
+			vpnIPs = append(vpnIPs, vpnInfo.IPv6Address)
+			if vpnInfo.IPv4Address != nil {
+				vpnIPs = append(vpnIPs, vpnInfo.IPv4Address)
+			}
+		} else {
+			return nil, fmt.Errorf("address family mismatch when assigning VPN addresses to node: node=%v, VPN ipv4=%v ipv6=%v", nodeIPs, vpnInfo.IPv4Address, vpnInfo.IPv6Address)
+		}
+
+		// Overwrite nodeip and flannel interface and throw a warning if user explicitly set those parameters
+		if len(vpnIPs) != 0 {
+			logrus.Infof("Node-ip changed to %v due to VPN", vpnIPs)
+			if len(cfg.NodeIP.Value()) != 0 {
+				logrus.Warn("VPN provider overrides configured node-ip parameter")
+			}
+			if len(cfg.NodeExternalIP.Value()) != 0 {
+				logrus.Warn("VPN provider overrides node-external-ip parameter")
+			}
+
+			// There is no way to clear the backing slice for the StringSlice
+			// so we have to recreate it and rebind it to the flag.
+			cfg.NodeIP = cli.StringSlice{}
+			cmds.NodeIPFlag.Destination = &cfg.NodeIP
+			for _, ip := range vpnIPs {
+				cfg.NodeIP.Set(ip.String())
+			}
+			cfg.FlannelIface = vpnInfo.Interface
+		}
+	}
+	return &Embedded{vpnInfo: vpnInfo}, nil
 }
 
 func (e *Embedded) Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node, cfg cmds.Agent) error {
 	e.apiServerReady = util.APIServerReadyChan(ctx, nodeConfig.AgentConfig.KubeConfigK3sController, util.DefaultAPIServerReadyTimeout)
-	e.etcdReady = make(chan struct{})
-	e.criReady = make(chan struct{})
+	e.etcdReady = wait.New()
+	e.criReady = wait.New()
 	e.nodeConfig = nodeConfig
 
 	go once.Do(func() {
@@ -79,15 +149,12 @@ func (e *Embedded) Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node,
 		defer cancel()
 
 		klog.InitFlags(nil)
-		for {
+		wait.PollUntilContextCancel(logCtx, time.Second, true, func(_ context.Context) (bool, error) {
 			flag.Set("v", strconv.Itoa(cmds.LogConfig.VLevel))
-
-			select {
-			case <-time.After(time.Second):
-			case <-logCtx.Done():
-				return
-			}
-		}
+			flag.Set("legacy_stderr_threshold_behavior", "false")
+			flag.Set("stderrthreshold", "INFO")
+			return false, nil
+		})
 	})
 
 	if nodeConfig.Flannel.Backend != flannel.BackendNone {
@@ -97,50 +164,6 @@ func (e *Embedded) Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node,
 			nodeConfig.Flannel.Iface, err = net.InterfaceByName(cfg.FlannelIface)
 			if err != nil {
 				return errors.WithMessagef(err, "unable to find interface %s", cfg.FlannelIface)
-			}
-		}
-
-		// If there is a VPN, we must overwrite NodeIP and flannel interface
-		var vpnInfo *vpn.Info
-		if cfg.VPNAuth != "" {
-			vpnInfo, err = vpn.GetInfo(cfg.VPNAuth)
-			if err != nil {
-				return err
-			}
-
-			// Pass ipv4, ipv6 or both depending on nodeIPs mode
-			nodeIPs := nodeConfig.AgentConfig.NodeIPs
-			var vpnIPs []net.IP
-			if utilsnet.IsIPv4(nodeIPs[0]) && vpnInfo.IPv4Address != nil {
-				vpnIPs = append(vpnIPs, vpnInfo.IPv4Address)
-				if vpnInfo.IPv6Address != nil {
-					vpnIPs = append(vpnIPs, vpnInfo.IPv6Address)
-				}
-			} else if utilsnet.IsIPv6(nodeIPs[0]) && vpnInfo.IPv6Address != nil {
-				vpnIPs = append(vpnIPs, vpnInfo.IPv6Address)
-				if vpnInfo.IPv4Address != nil {
-					vpnIPs = append(vpnIPs, vpnInfo.IPv4Address)
-				}
-			} else {
-				return fmt.Errorf("address family mismatch when assigning VPN addresses to node: node=%v, VPN ipv4=%v ipv6=%v", nodeIPs, vpnInfo.IPv4Address, vpnInfo.IPv6Address)
-			}
-
-			// Overwrite nodeip and flannel interface and throw a warning if user explicitly set those parameters
-			if len(vpnIPs) != 0 {
-				logrus.Infof("Node-ip changed to %v due to VPN", vpnIPs)
-				if len(cfg.NodeIP.Value()) != 0 {
-					logrus.Warn("VPN provider overrides configured node-ip parameter")
-				}
-				if len(cfg.NodeExternalIP.Value()) != 0 {
-					logrus.Warn("VPN provider overrides node-external-ip parameter")
-				}
-				nodeIPs = vpnIPs
-				nodeConfig.AgentConfig.NodeIPs = vpnIPs
-				nodeConfig.AgentConfig.NodeIP = vpnIPs[0].String()
-				nodeConfig.Flannel.Iface, err = net.InterfaceByName(vpnInfo.Interface)
-				if err != nil {
-					return errors.WithMessagef(err, "unable to find vpn interface: %s", vpnInfo.Interface)
-				}
 			}
 		}
 
@@ -156,12 +179,13 @@ func (e *Embedded) Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node,
 			nodeConfig.Flannel.ConfFile = cfg.FlannelConf
 			nodeConfig.Flannel.ConfOverride = true
 		}
+		nodeConfig.Flannel.CNIConfFile = cfg.FlannelCniConfFile
 		nodeConfig.AgentConfig.CNIBinDir = filepath.Dir(hostLocal)
 		nodeConfig.AgentConfig.CNIConfDir = filepath.Join(cfg.DataDir, "agent", "etc", "cni", "net.d")
 
 		// It does not make sense to use VPN without its flannel backend
-		if cfg.VPNAuth != "" {
-			nodeConfig.Flannel.Backend = vpnInfo.ProviderName
+		if e.vpnInfo != nil {
+			nodeConfig.Flannel.Backend = e.vpnInfo.ProviderName
 		}
 	}
 
@@ -173,7 +197,9 @@ func (e *Embedded) Kubelet(ctx context.Context, args []string) error {
 	command.SetArgs(args)
 
 	go func() {
-		<-e.APIServerReadyChan()
+		if err := e.APIServerReadyChan().Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("kubelet panic: %v", err)
@@ -194,7 +220,9 @@ func (e *Embedded) KubeProxy(ctx context.Context, args []string) error {
 	command.SetArgs(util.GetArgs(platformKubeProxyArgs(e.nodeConfig), args))
 
 	go func() {
-		<-e.APIServerReadyChan()
+		if err := e.APIServerReadyChan().Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("kube-proxy panic: %v", err)
@@ -216,11 +244,20 @@ func (*Embedded) APIServerHandlers(ctx context.Context) (authenticator.Request, 
 }
 
 func (e *Embedded) APIServer(ctx context.Context, args []string) error {
+	// set feature-gates now, to avoid race conditions between components started in parallel
+	if featureGates := util.ArgValue("feature-gates", args); featureGates != "" {
+		if err := utilfeature.DefaultMutableFeatureGate.Set(featureGates); err != nil {
+			logrus.Warnf("Failed to set feature-gates %s: %v", featureGates, err)
+		}
+	}
+
 	command := apiapp.NewAPIServerCommand(ctx.Done())
 	command.SetArgs(args)
 
 	go func() {
-		<-e.ETCDReadyChan()
+		if err := e.ETCDReadyChan().Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("apiserver panic: %v", err)
@@ -236,13 +273,17 @@ func (e *Embedded) APIServer(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (e *Embedded) Scheduler(ctx context.Context, nodeReady <-chan struct{}, args []string) error {
+func (e *Embedded) Scheduler(ctx context.Context, nodeReady *wait.Chan, args []string) error {
 	command := sapp.NewSchedulerCommand(ctx.Done())
 	command.SetArgs(args)
 
 	go func() {
-		<-e.APIServerReadyChan()
-		<-nodeReady
+		if err := e.APIServerReadyChan().Wait(ctx); err != nil {
+			return
+		}
+		if err := nodeReady.Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("scheduler panic: %v", err)
@@ -263,7 +304,9 @@ func (e *Embedded) ControllerManager(ctx context.Context, args []string) error {
 	command.SetArgs(args)
 
 	go func() {
-		<-e.APIServerReadyChan()
+		if err := e.APIServerReadyChan().Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("controller-manager panic: %v", err)
@@ -279,7 +322,7 @@ func (e *Embedded) ControllerManager(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (*Embedded) CloudControllerManager(ctx context.Context, ccmRBACReady <-chan struct{}, args []string) error {
+func (*Embedded) CloudControllerManager(ctx context.Context, ccmRBACReady *wait.Chan, args []string) error {
 	ccmOptions, err := ccmopt.NewCloudControllerManagerOptions()
 	if err != nil {
 		logrus.Fatalf("unable to initialize command options: %v", err)
@@ -308,7 +351,9 @@ func (*Embedded) CloudControllerManager(ctx context.Context, ccmRBACReady <-chan
 	command.SetArgs(args)
 
 	go func() {
-		<-ccmRBACReady
+		if err := ccmRBACReady.Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("cloud-controller-manager panic: %v", err)
@@ -334,40 +379,43 @@ func (e *Embedded) ETCD(ctx context.Context, wg *sync.WaitGroup, args *executor.
 	// and ready to accept client requests.
 	if e.etcdReady != nil {
 		go func() {
-			for {
+			wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 				if err := test(ctx, true); err != nil {
 					logrus.Infof("Failed to test etcd connection: %v", err)
-				} else {
-					logrus.Info("Connection to etcd is ready")
-					close(e.etcdReady)
-					return
+					return false, nil
 				}
-
-				select {
-				case <-time.After(5 * time.Second):
-				case <-ctx.Done():
-					return
-				}
-			}
+				logrus.Info("Connection to etcd is ready")
+				e.etcdReady.MarkReady()
+				return true, nil
+			})
 		}()
 	}
 	return etcd.StartETCD(ctx, wg, args, extraArgs)
 }
 
 func (e *Embedded) Containerd(ctx context.Context, cfg *daemonconfig.Node) error {
-	return executor.CloseIfNilErr(containerd.Run(ctx, cfg), e.criReady)
+	return e.markCRIReady(containerd.Run(ctx, cfg))
 }
 
 func (e *Embedded) Docker(ctx context.Context, cfg *daemonconfig.Node) error {
-	return executor.CloseIfNilErr(cridockerd.Run(ctx, cfg), e.criReady)
+	return e.markCRIReady(cridockerd.Run(ctx, cfg))
 }
 
 func (e *Embedded) CRI(ctx context.Context, cfg *daemonconfig.Node) error {
 	// agentless sets cri socket path to /dev/null to indicate no CRI is needed
 	if cfg.ContainerRuntimeEndpoint != "/dev/null" {
-		return executor.CloseIfNilErr(cri.WaitForService(ctx, cfg.ContainerRuntimeEndpoint, "CRI"), e.criReady)
+		return e.markCRIReady(cri.WaitForService(ctx, cfg.ContainerRuntimeEndpoint, "CRI"))
 	}
-	return executor.CloseIfNilErr(nil, e.criReady)
+	return e.markCRIReady(nil)
+}
+
+func (e *Embedded) markCRIReady(err error) error {
+	if err != nil {
+		e.criReady.MarkFailed(err)
+	} else {
+		e.criReady.MarkReady()
+	}
+	return err
 }
 
 func (e *Embedded) CNI(ctx context.Context, wg *sync.WaitGroup, cfg *daemonconfig.Node) error {
@@ -395,21 +443,21 @@ func (e *Embedded) CNI(ctx context.Context, wg *sync.WaitGroup, cfg *daemonconfi
 	return nil
 }
 
-func (e *Embedded) APIServerReadyChan() <-chan struct{} {
+func (e *Embedded) APIServerReadyChan() *wait.Chan {
 	if e.apiServerReady == nil {
 		panic("executor not bootstrapped")
 	}
 	return e.apiServerReady
 }
 
-func (e *Embedded) ETCDReadyChan() <-chan struct{} {
+func (e *Embedded) ETCDReadyChan() *wait.Chan {
 	if e.etcdReady == nil {
 		panic("executor not bootstrapped")
 	}
 	return e.etcdReady
 }
 
-func (e *Embedded) CRIReadyChan() <-chan struct{} {
+func (e *Embedded) CRIReadyChan() *wait.Chan {
 	if e.criReady == nil {
 		panic("executor not bootstrapped")
 	}
@@ -418,4 +466,11 @@ func (e *Embedded) CRIReadyChan() <-chan struct{} {
 
 func (e Embedded) IsSelfHosted() bool {
 	return false
+}
+
+func (e Embedded) GetVPNInfo() (*vpn.Info, error) {
+	if e.vpnInfo != nil {
+		return e.vpnInfo, nil
+	}
+	return nil, errors.New("VPN info not set")
 }

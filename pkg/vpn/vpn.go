@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/k3s-io/k3s/pkg/daemons/executor"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
 
@@ -17,6 +18,10 @@ import (
 const (
 	tailscaleIf = "tailscale0"
 )
+
+type InfoProvider interface {
+	GetVPNInfo() (*Info, error)
+}
 
 type TailscaleOutput struct {
 	TailscaleIPs []string `json:"TailscaleIPs"`
@@ -72,7 +77,10 @@ func StartVPN(vpnAuthConfigFile string) error {
 		logrus.Debugf("Flags passed to tailscale up: %v", args)
 		output, err := util.ExecCommand("tailscale", args)
 		if err != nil {
-			return errors.WithMessage(err, "tailscale up failed: "+output)
+			if output != "" {
+				return errors.WithMessagef(err, "tailscale up failed (%q)", output)
+			}
+			return errors.WithMessage(err, "tailscale up failed")
 		}
 		logrus.Debugf("Output from tailscale up: %v", output)
 		return nil
@@ -94,6 +102,14 @@ func GetInfo(vpnAuth string) (*Info, error) {
 	return nil, nil
 }
 
+func GetInfoFromExecutor() (*Info, error) {
+	ex := executor.Get()
+	if provider, ok := ex.(InfoProvider); ok {
+		return provider.GetVPNInfo()
+	}
+	return nil, errors.New("executor does not provide VPN info")
+}
+
 // getVPNAuthInfo returns the required authInfo object
 func getVPNAuthInfo(vpnAuth string) (vpnCliAuthInfo, error) {
 	var authInfo vpnCliAuthInfo
@@ -104,16 +120,19 @@ func getVPNAuthInfo(vpnAuth string) (vpnCliAuthInfo, error) {
 
 	vpnParameters := strings.Split(vpnCommand, ",")
 	for _, vpnKeyValues := range vpnParameters {
-		vpnKeyValue := strings.Split(vpnKeyValues, "=")
-		switch vpnKeyValue[0] {
+		key, value, found := strings.Cut(vpnKeyValues, "=")
+		if !found {
+			return vpnCliAuthInfo{}, fmt.Errorf("VPN Error. The passed VPN auth info includes an invalid parameter: %v", key)
+		}
+		switch key {
 		case "name":
-			authInfo.Name = vpnKeyValue[1]
+			authInfo.Name = value
 		case "joinKey":
-			authInfo.JoinKey = vpnKeyValue[1]
+			authInfo.JoinKey = value
 		case "controlServerURL":
-			authInfo.ControlServerURL = vpnKeyValue[1]
+			authInfo.ControlServerURL = value
 		default:
-			return vpnCliAuthInfo{}, fmt.Errorf("VPN Error. The passed VPN auth info includes an unknown parameter: %v", vpnKeyValue[0])
+			return vpnCliAuthInfo{}, fmt.Errorf("VPN Error. The passed VPN auth info includes an unknown parameter: %v", key)
 		}
 	}
 
