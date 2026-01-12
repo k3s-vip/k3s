@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync"
 
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/rancher/wrangler/v3/pkg/apply"
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/apps"
@@ -48,6 +50,24 @@ type k3s struct {
 	nodeCache      coreclient.NodeCache
 	podCache       coreclient.PodCache
 	workqueue      workqueue.RateLimitingInterface
+
+	// nodeStateMu guards nodeStates, which records the last-seen state of each node keyed by
+	// node name. Nodes change far more often than the fields we care about (kubelet heartbeats,
+	// etc.), so onChangeNode uses this to react only when a tracked field actually changes.
+	nodeStateMu sync.Mutex
+	nodeStates  map[string]nodeState
+}
+
+// nodeState is the per-node state tracked across Node change events, used by onChangeNode to
+// decide what needs reconciling when a node changes.
+type nodeState struct {
+	// addresses is a stable representation of the node addresses used to populate LoadBalancer
+	// status, so changes to them can be detected.
+	addresses string
+	// hasSelectorLabel records whether the node carried daemonsetNodeLabel. Whether the ServiceLB
+	// DaemonSets use a NodeSelector depends on any node in the cluster having that label, so a node
+	// gaining or losing it - or a labeled node being deleted - must re-evaluate the DaemonSets.
+	hasSelectorLabel bool
 }
 
 var _ cloudprovider.Interface = &k3s{}
@@ -82,13 +102,13 @@ func init() {
 }
 
 func (k *k3s) Initialize(clientBuilder cloudprovider.ControllerClientBuilder, stop <-chan struct{}) {
-	ctx := wait.ContextForChannel(stop)
+	ctx := logger.NewContext(wait.ContextForChannel(stop), controllerName)
 	config := clientBuilder.ConfigOrDie(controllerName)
 	k.client = kubernetes.NewForConfigOrDie(config)
 
 	if k.LBEnabled {
 		// Wrangler controller and caches are only needed if the load balancer controller is enabled.
-		k.recorder = util.BuildControllerEventRecorder(k.client, controllerName, meta.NamespaceAll)
+		k.recorder = util.BuildControllerEventRecorder(ctx, k.client, controllerName, meta.NamespaceAll)
 		coreFactory := core.NewFactoryFromConfigOrDie(config)
 		k.nodeCache = coreFactory.Core().V1().Node().Cache()
 
@@ -105,6 +125,7 @@ func (k *k3s) Initialize(clientBuilder cloudprovider.ControllerClientBuilder, st
 		k.endpointsCache = lbDiscFactory.Discovery().V1().EndpointSlice().Cache()
 		k.podCache = lbCoreFactory.Core().V1().Pod().Cache()
 		k.workqueue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+		k.nodeStates = map[string]nodeState{}
 
 		if err := k.Register(ctx, coreFactory.Core().V1().Node(), lbCoreFactory.Core().V1().Pod(), lbDiscFactory.Discovery().V1().EndpointSlice()); err != nil {
 			logrus.Panicf("failed to register %s handlers: %v", controllerName, err)

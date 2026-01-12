@@ -1,8 +1,9 @@
 #!/bin/bash
 
-GIT_TAG=$TAG
+GIT_TAG=$(awk '/src\/k8s.io\/client-go/ {print $NF}' go.mod | awk -F- '{print $1}')+${OEM:-vip}
 TREE_STATE=clean
-COMMIT=$GITHUB_SHA
+COMMIT=$(git rev-parse HEAD)
+DIRTY=""
 
 if [ -d .git ]; then
     if [ -z "$GIT_TAG" ]; then

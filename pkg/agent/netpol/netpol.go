@@ -13,16 +13,15 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	cloudproviderapi "k8s.io/cloud-provider/api"
 
 	"github.com/cloudnativelabs/kube-router/v2/pkg/controllers/netpol"
 	"github.com/cloudnativelabs/kube-router/v2/pkg/healthcheck"
 	krmetrics "github.com/cloudnativelabs/kube-router/v2/pkg/metrics"
 	"github.com/cloudnativelabs/kube-router/v2/pkg/options"
+	"github.com/cloudnativelabs/kube-router/v2/pkg/svcip"
 	"github.com/cloudnativelabs/kube-router/v2/pkg/utils"
 	"github.com/cloudnativelabs/kube-router/v2/pkg/version"
-	"github.com/coreos/go-iptables/iptables"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/metrics"
 	"github.com/k3s-io/k3s/pkg/util"
@@ -31,7 +30,18 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 )
+
+type sharedInformers struct {
+	pods            cache.SharedIndexInformer
+	namespaces      cache.SharedIndexInformer
+	networkPolicies cache.SharedIndexInformer
+}
+
+func (s *sharedInformers) Pods() cache.SharedIndexInformer            { return s.pods }
+func (s *sharedInformers) Namespaces() cache.SharedIndexInformer      { return s.namespaces }
+func (s *sharedInformers) NetworkPolicies() cache.SharedIndexInformer { return s.networkPolicies }
 
 func init() {
 	// ensure that kube-router exposes metrics through the same registry used by Kubernetes components
@@ -70,14 +80,8 @@ func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error
 	// Wait until the ready condition is updated and the uninitialized taint has
 	// been removed, at which point the addresses should be synced.
 	startTime := time.Now().Truncate(time.Second)
-	if err := wait.PollUntilContextTimeout(ctx, 2*time.Second, util.DefaultAPIServerReadyTimeout, true, func(ctx context.Context) (bool, error) {
+	if err := util.WaitForNode(ctx, client, nodeConfig.AgentConfig.NodeName, func(node *v1.Node) (bool, error) {
 		var readyTime metav1.Time
-		// Get the node object
-		node, err := client.CoreV1().Nodes().Get(ctx, nodeConfig.AgentConfig.NodeName, metav1.GetOptions{})
-		if err != nil {
-			logrus.Infof("Network policy controller waiting to get Node %s: %v", nodeConfig.AgentConfig.NodeName, err)
-			return false, nil
-		}
 		for _, cond := range node.Status.Conditions {
 			if cond.Type == v1.NodeReady && cond.Status == v1.ConditionTrue {
 				readyTime = cond.LastHeartbeatTime
@@ -109,51 +113,39 @@ func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error
 	krConfig.EnableIPv6 = nodeConfig.AgentConfig.EnableIPv6
 	krConfig.NodePortRange = strings.ReplaceAll(nodeConfig.AgentConfig.ServiceNodePortRange.String(), "-", ":")
 	krConfig.HostnameOverride = nodeConfig.AgentConfig.NodeName
+	krConfig.NetPolDefaultDeny = false
 	krConfig.MetricsEnabled = true
 	krConfig.RunFirewall = true
 	krConfig.RunRouter = false
 	krConfig.RunServiceProxy = false
+	krConfig.StrictExternalIPValidation = false
+	krConfig.UseNftablesForNetpol = false
 
 	stopCh := ctx.Done()
 	healthCh := make(chan *healthcheck.ControllerHeartbeat)
 
 	informerFactory := informers.NewSharedInformerFactory(client, 0)
-	podInformer := informerFactory.Core().V1().Pods().Informer()
-	nsInformer := informerFactory.Core().V1().Namespaces().Informer()
-	npInformer := informerFactory.Networking().V1().NetworkPolicies().Informer()
+	krInformers := &sharedInformers{
+		pods:            informerFactory.Core().V1().Pods().Informer(),
+		namespaces:      informerFactory.Core().V1().Namespaces().Informer(),
+		networkPolicies: informerFactory.Networking().V1().NetworkPolicies().Informer(),
+	}
 	informerFactory.Start(stopCh)
 	informerFactory.WaitForCacheSync(stopCh)
 
-	iptablesCmdHandlers := make(map[v1.IPFamily]utils.IPTablesHandler, 2)
-	ipSetHandlers := make(map[v1.IPFamily]utils.IPSetHandler, 2)
-
-	if nodeConfig.AgentConfig.EnableIPv4 {
-		iptHandler, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
-		if err != nil {
-			return errors.WithMessage(err, "failed to create iptables handler")
-		}
-		iptablesCmdHandlers[v1.IPv4Protocol] = iptHandler
-
-		ipset, err := utils.NewIPSet(false)
-		if err != nil {
-			return errors.WithMessage(err, "failed to create ipset handler")
-		}
-		ipSetHandlers[v1.IPv4Protocol] = ipset
+	iptablesCmdHandlers, ipSetHandlers, err := netpol.NewIPTablesHandlers(krConfig)
+	if err != nil {
+		return errors.WithMessage(err, "failed to create iptables handler")
 	}
 
-	if nodeConfig.AgentConfig.EnableIPv6 {
-		ipt6Handler, err := iptables.NewWithProtocol(iptables.ProtocolIPv6)
-		if err != nil {
-			return errors.WithMessage(err, "failed to create iptables handler")
-		}
-		iptablesCmdHandlers[v1.IPv6Protocol] = ipt6Handler
-
-		ipset, err := utils.NewIPSet(true)
-		if err != nil {
-			return errors.WithMessage(err, "failed to create ipset handler")
-		}
-		ipSetHandlers[v1.IPv6Protocol] = ipset
-	}
+	ipValidator, err := svcip.NewValidator(svcip.Config{
+		ExternalIPCIDRs:   krConfig.ExternalIPCIDRs,
+		LoadBalancerCIDRs: krConfig.LoadBalancerCIDRs,
+		ClusterIPCIDRs:    krConfig.ClusterIPCIDRs,
+		StrictValidation:  krConfig.StrictExternalIPValidation,
+		EnableIPv4:        krConfig.EnableIPv4,
+		EnableIPv6:        krConfig.EnableIPv6,
+	})
 
 	// Start kube-router healthcheck controller; netpol requires it
 	hc, err := healthcheck.NewHealthController(krConfig)
@@ -176,15 +168,11 @@ func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error
 	wg.Add(1)
 	go metricsRunCheck(mc, healthCh, stopCh, wg)
 
-	npc, err := netpol.NewNetworkPolicyController(client, krConfig, podInformer, npInformer, nsInformer, &sync.Mutex{}, nil,
-		iptablesCmdHandlers, ipSetHandlers)
+	npc, err := netpol.NewNetworkPolicyController(client, krConfig, krInformers, &sync.Mutex{}, nil,
+		iptablesCmdHandlers, ipSetHandlers, ipValidator, nil)
 	if err != nil {
 		return errors.WithMessage(err, "unable to initialize network policy controller")
 	}
-
-	podInformer.AddEventHandler(npc.PodEventHandler)
-	nsInformer.AddEventHandler(npc.NamespaceEventHandler)
-	npInformer.AddEventHandler(npc.NetworkPolicyEventHandler)
 
 	wg.Add(1)
 	logrus.Infof("Starting network policy controller version %s, built on %s, %s", version.Version, version.BuildDate, runtime.Version())

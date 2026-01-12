@@ -99,7 +99,14 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 	if err != nil {
 		return errors.WithMessage(err, "failed to validate kube-proxy conntrack configuration")
 	}
-	syssetup.Configure(enableIPv6, conntrackConfig)
+	// The net/bridge/bridge-nf-call-{ip,ip6}tables sysctls are only required by kube-proxy
+	// and flannel. When both are disabled the node is using an alternative CNI, so leave
+	// these sysctls untouched for the administrator to manage. See
+	// https://github.com/k3s-io/k3s/issues/14022. The flannel backend is compared against the
+	// "none" literal rather than flannel.BackendNone to avoid importing the flannel package,
+	// which registers all flannel backends via init().
+	setBridgeFilter := !config.KubeProxyDisabled(ctx, nodeConfig, proxy) || nodeConfig.Flannel.Backend != "none"
+	syssetup.Configure(enableIPv6, setBridgeFilter, conntrackConfig)
 	nodeConfig.AgentConfig.EnableIPv4 = enableIPv4
 	nodeConfig.AgentConfig.EnableIPv6 = enableIPv6
 
@@ -265,8 +272,10 @@ func RunStandalone(ctx context.Context, wg *sync.WaitGroup, cfg cmds.Agent) erro
 		return err
 	}
 
-	if err := tunnelSetup(ctx, nodeConfig, cfg, proxy); err != nil {
-		return err
+	if !cfg.DisableLoadBalancer {
+		if err := tunnelSetup(ctx, nodeConfig, cfg, proxy); err != nil {
+			return err
+		}
 	}
 	if err := certMonitorSetup(ctx, nodeConfig, cfg); err != nil {
 		return err
@@ -321,7 +330,7 @@ func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Pr
 		return nil, err
 	}
 
-	_, nodeIPs, err := util.GetHostnameAndIPs(cfg.NodeName, cfg.NodeIP.Value())
+	_, nodeIPs, err := util.GetHostnameAndIPs(ctx, cfg.NodeName, cfg.NodeIP.Value())
 	if err != nil {
 		return nil, errors.WithMessage(err, "failed to get node name and addresses")
 	}
