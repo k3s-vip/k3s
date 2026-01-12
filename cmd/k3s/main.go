@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,26 +92,18 @@ func main() {
 		),
 	}
 
-	if err := app.Run(os.Args); err != nil && !errors.Is(err, context.Canceled) {
-		logrus.Fatalf("Error: %v", err)
-	}
+	cmds.MustRun(app, os.Args)
 }
 
 // findDebug reads debug settings from the environment, CLI args, and config file.
 func findDebug(args []string) bool {
-	debug, _ := strconv.ParseBool(os.Getenv(version.ProgramUpper + "_DEBUG"))
-	if debug {
-		return debug
+	if debug, _ := strconv.ParseBool(os.Getenv(version.ProgramUpper + "_DEBUG")); debug {
+		return true
 	}
-	fs := pflag.NewFlagSet("debug-set", pflag.ContinueOnError)
-	fs.ParseErrorsWhitelist.UnknownFlags = true
-	fs.SetOutput(io.Discard)
-	fs.BoolVarP(&debug, "debug", "", false, "(logging) Turn on debug logs")
-	fs.Parse(args)
-	if debug {
-		return debug
+	if findBoolFlag(args, "debug", "", "(logging) Turn on debug logs") {
+		return true
 	}
-	debug, _ = strconv.ParseBool(configfilearg.MustFindString(args, "debug", externalCLIActions...))
+	debug, _ := strconv.ParseBool(configfilearg.MustFindString(args, "debug", externalCLIActions...))
 	return debug
 }
 
@@ -120,19 +111,13 @@ func findDebug(args []string) bool {
 // If not found, the default will be used, which varies depending on whether
 // k3s is being run as root or not.
 func findDataDir(args []string) string {
-	dataDir := os.Getenv(version.ProgramUpper + "_DATA_DIR")
-	if dataDir != "" {
+	if dataDir := os.Getenv(version.ProgramUpper + "_DATA_DIR"); dataDir != "" {
 		return dataDir
 	}
-	fs := pflag.NewFlagSet("data-dir-set", pflag.ContinueOnError)
-	fs.ParseErrorsWhitelist.UnknownFlags = true
-	fs.SetOutput(io.Discard)
-	fs.StringVarP(&dataDir, "data-dir", "d", "", "Data directory")
-	fs.Parse(args)
-	if dataDir != "" {
+	if dataDir := findStringFlag(args, "data-dir", "d", "Data directory"); dataDir != "" {
 		return dataDir
 	}
-	dataDir = configfilearg.MustFindString(args, "data-dir", externalCLIActions...)
+	dataDir := configfilearg.MustFindString(args, "data-dir", externalCLIActions...)
 	if d, err := datadir.Resolve(dataDir); err == nil {
 		dataDir = d
 	} else {
@@ -145,9 +130,7 @@ func findDataDir(args []string) string {
 // we use pflag to process the args because we not yet parsed flags bound to the cli.Context
 func findPreferBundledBin(args []string) bool {
 	var preferBundledBin bool
-	fs := pflag.NewFlagSet("prefer-set", pflag.ContinueOnError)
-	fs.ParseErrorsWhitelist.UnknownFlags = true
-	fs.SetOutput(io.Discard)
+	fs := newFlagSet("prefer-set")
 	fs.BoolVar(&preferBundledBin, "prefer-bundled-bin", false, "Prefer bundled binaries")
 
 	preferRes := configfilearg.MustFindString(args, "prefer-bundled-bin", externalCLIActions...)
@@ -157,6 +140,29 @@ func findPreferBundledBin(args []string) bool {
 
 	fs.Parse(args)
 	return preferBundledBin
+}
+
+func findBoolFlag(args []string, name, short, usage string) bool {
+	var value bool
+	fs := newFlagSet(name + "-set")
+	fs.BoolVarP(&value, name, short, false, usage)
+	fs.Parse(args)
+	return value
+}
+
+func findStringFlag(args []string, name, short, usage string) string {
+	var value string
+	fs := newFlagSet(name + "-set")
+	fs.StringVarP(&value, name, short, "", usage)
+	fs.Parse(args)
+	return value
+}
+
+func newFlagSet(name string) *pflag.FlagSet {
+	fs := pflag.NewFlagSet(name, pflag.ContinueOnError)
+	fs.ParseErrorsAllowlist.UnknownFlags = true
+	fs.SetOutput(io.Discard)
+	return fs
 }
 
 // runCLIs handles the case where the binary is being executed as a symlink alias,
@@ -350,12 +356,12 @@ func extract(dataDir string) (string, error) {
 		return "", err
 	}
 	for _, ent := range ents {
-		if info, err := ent.Info(); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		if info, err := ent.Info(); err == nil && info.Mode()&os.ModeSymlink == os.ModeSymlink {
 			if target, err := os.Readlink(filepath.Join(dir, "bin", ent.Name())); err == nil && target == "cni" {
 				src := filepath.Join(cniPath, ent.Name())
 				// Check if plugin already exists in stable CNI bin dir
 				if info, err := os.Lstat(src); err == nil {
-					if info.Mode()&fs.ModeSymlink != 0 {
+					if info.Mode()&os.ModeSymlink == os.ModeSymlink {
 						// Exists and is a symlink, remove it so we can create a new symlink for the new bin.
 						os.Remove(src)
 					} else {
