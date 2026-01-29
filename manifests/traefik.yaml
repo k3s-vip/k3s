@@ -17,18 +17,17 @@ spec:
   set:
     global.systemDefaultRegistry: "%{SYSTEM_DEFAULT_REGISTRY_RAW}%"
   valuesContent: |-
-    deployment:
-      podAnnotations:
-        prometheus.io/port: "8082"
-        prometheus.io/scrape: "true"
+    globalArguments:
+    - --global.checknewversion=false
+    - --global.sendanonymoususage=false
     providers:
       kubernetesIngress:
         publishedService:
           enabled: true
     priorityClassName: "system-cluster-critical"
     image:
-      repository: "rancher/mirrored-library-traefik"
-      tag: "3.6.7"
+      repository: "library/traefik"
+      tag: "v3.6"
     tolerations:
     - key: "CriticalAddonsOnly"
       operator: "Exists"
@@ -37,3 +36,4 @@ spec:
       effect: "NoSchedule"
     service:
       ipFamilyPolicy: "PreferDualStack"
+      type: "ClusterIP"
