@@ -40,6 +40,7 @@ import (
 	"github.com/spegel-org/spegel/pkg/registry"
 	"github.com/spegel-org/spegel/pkg/routing"
 	"github.com/spegel-org/spegel/pkg/state"
+	"github.com/spegel-org/spegel/pkg/web"
 	"k8s.io/component-base/metrics/legacyregistry"
 )
 
@@ -57,8 +58,10 @@ var (
 	P2pEnabledLabel      = "p2p." + version.Program + ".cattle.io/enabled"
 	P2pPortEnv           = version.ProgramUpper + "_P2P_PORT"
 	P2pEnableLatestEnv   = version.ProgramUpper + "_P2P_ENABLE_LATEST"
+	P2PEnableDebugWebEnv = version.ProgramUpper + "_P2P_ENABLE_DEBUG_WEB"
 
 	resolveLatestTag = false
+	enableDebugWeb   = false
 
 	wildcardRegistries = []string{"_default", "*"}
 
@@ -140,16 +143,13 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 		return nil
 	}
 
-	filters := []oci.Filter{}
+	var filters []oci.Filter
 	regFilter, err := oci.FilterForMirroredRegistries(urls)
 	if err != nil {
 		return err
 	}
 	if regFilter != nil {
 		filters = append(filters, *regFilter)
-	}
-	if !resolveLatestTag {
-		filters = append(filters, oci.RegexFilter{Regex: regexp.MustCompile(`:latest$`)})
 	}
 
 	logrus.Infof("Starting distributed registry mirror at https://%s:%s/v2 for registries %v",
@@ -227,6 +227,19 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 			resolveLatestTag = b
 		}
 	}
+	if !resolveLatestTag {
+		filters = append(filters, oci.RegexFilter{Regex: regexp.MustCompile(`:latest$`)})
+	}
+	logrus.Infof("Starting distributed registry %+v", filters)
+
+	// get debug web configuration override
+	if env := os.Getenv(P2PEnableDebugWebEnv); env != "" {
+		if b, err := strconv.ParseBool(env); err != nil {
+			logrus.Warnf("Invalid %s value; using default %v", P2PEnableDebugWebEnv, enableDebugWeb)
+		} else {
+			enableDebugWeb = b
+		}
+	}
 
 	// get port and start p2p router
 	routerPort := defaultRouterPort
@@ -240,15 +253,12 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 	routerAddr := net.JoinHostPort(c.ExternalAddress, routerPort)
 
 	logrus.Infof("Starting distributed registry P2P node at %s", routerAddr)
-	opts := []routing.P2PRouterOption{
-		routing.WithLogConnectivityErrors(false),
-		routing.WithLibP2POptions(
-			libp2p.Identity(p2pKey),
-			libp2p.Peerstore(ps),
-			libp2p.PrivateNetwork(c.PSK),
-		),
-	}
-	c.router, err = routing.NewP2PRouter(ctx, routerAddr, NewNotSelfBootstrapper(c.Bootstrapper), c.RegistryPort, opts...)
+	opts := routing.WithLibP2POptions(
+		libp2p.Identity(p2pKey),
+		libp2p.Peerstore(ps),
+		libp2p.PrivateNetwork(c.PSK),
+	)
+	c.router, err = routing.NewP2PRouter(ctx, routerAddr, NewNotSelfBootstrapper(c.Bootstrapper), c.RegistryPort, opts)
 	if err != nil {
 		return pkgerrors.WithMessage(err, "failed to create P2P router")
 	}
@@ -301,9 +311,22 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 	sRouter.Use(auth.MaxInFlight(maxNonMutatingPeerInfoRequests, maxMutatingPeerInfoRequests))
 	sRouter.Handle("", c.peerInfo())
 
+	if enableDebugWeb {
+		webOpts := []web.WebOption{
+			web.WithRegistryFilters(filters),
+			web.WithOCIClient(ociClient),
+		}
+		newWeb, err := web.NewWeb(c.router, ociStore, reg, &url.URL{Scheme: "https", Host: regSvr.Addr}, webOpts...)
+		if err != nil {
+			return pkgerrors.WithMessage(err, "failed to enable embedded registry debug web interface")
+		}
+		mRouter.PathPrefix("/debug/web").Handler(newWeb.Handler(logr.FromContextOrDiscard(ctx)))
+		logrus.Warn("Embedded registry debug web interface enabled")
+	}
+
 	// Wait up to 5 seconds for the p2p network to find peers.
 	if err := wait.PollUntilContextTimeout(ctx, time.Second, resolveTimeout, true, func(ctx context.Context) (bool, error) {
-		ready, _ := c.router.Ready(ctx)
+		ready, _ := c.Ready(ctx)
 		return ready, nil
 	}); err != nil {
 		logrus.Warn("Failed to wait for distributed registry to become ready, will retry in the background")

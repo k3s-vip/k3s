@@ -18,7 +18,7 @@ PKG_CRI_DOCKERD="github.com/Mirantis/cri-dockerd"
 PKG_ETCD="go.etcd.io/etcd"
 PKG_HELM_CONTROLLER="github.com/k3s-io/helm-controller"
 
-buildDate=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+buildDate=2025-12-09T14:59:13Z
 
 VERSIONFLAGS="
     -X ${PKG}/pkg/version.Version=${VERSION}
@@ -35,26 +35,26 @@ VERSIONFLAGS="
     -X ${PKG_K8S_BASE}/version.gitTreeState=${TREE_STATE}
     -X ${PKG_K8S_BASE}/version.buildDate=${buildDate}
 
-    -X ${PKG_CRICTL}/version.Version=${VERSION_CRICTL}
+    -X ${PKG_CRICTL}/version.Version=${VERSION_CRICTL%%-*}
 
-    -X ${PKG_CONTAINERD}/version.Version=${VERSION_CONTAINERD}
+    -X ${PKG_CONTAINERD}/version.Version=${VERSION_CONTAINERD%%-*}
     -X ${PKG_CONTAINERD}/version.Package=${PKG_CONTAINERD_K3S}
 
-    -X ${PKG_CNI_PLUGINS}/pkg/utils/buildversion.BuildVersion=${VERSION_CNIPLUGINS}
+    -X ${PKG_CNI_PLUGINS}/pkg/utils/buildversion.BuildVersion=${VERSION_CNIPLUGINS%%-*}
     -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Program=flannel
-    -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Version=${VERSION_FLANNEL_PLUGIN}+${VERSION_FLANNEL}
+    -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Version=${VERSION_FLANNEL_PLUGIN%%-*}+${VERSION_FLANNEL%%-*}
     -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Commit=HEAD
     -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.buildDate=${buildDate}
 
-    -X ${PKG_KUBE_ROUTER}/pkg/version.Version=${VERSION_KUBE_ROUTER}
+    -X ${PKG_KUBE_ROUTER}/pkg/version.Version=${VERSION_KUBE_ROUTER%%-*}
     -X ${PKG_KUBE_ROUTER}/pkg/version.BuildDate=${buildDate}
 
-    -X ${PKG_CRI_DOCKERD}/cmd/version.Version=${VERSION_CRI_DOCKERD}
+    -X ${PKG_CRI_DOCKERD}/cmd/version.Version=${VERSION_CRI_DOCKERD%%-*}
     -X ${PKG_CRI_DOCKERD}/cmd/version.GitCommit=HEAD
     -X ${PKG_CRI_DOCKERD}/cmd/version.BuildTime=${buildDate}
 
     -X ${PKG_ETCD}/api/v3/version.GitSHA=HEAD
-    
+    -X google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=ignore
     -X ${PKG_HELM_CONTROLLER}/pkg/controllers/chart.DefaultJobImage=rancher/klipper-helm:${VERSION_HELM_JOB}
 "
 if [ -n "${DEBUG}" ]; then
@@ -99,11 +99,6 @@ case ${OS} in
     exit 1
     ;;
 esac
-
-if [ -n "${GOCOVER}" ]; then
-    BLDFLAGS="-cover"
-    TAGS="cover $TAGS"
-fi
 
 mkdir -p bin
 
@@ -162,10 +157,10 @@ INSTALLBIN=$(pwd)/bin
 if [ ! -x ${INSTALLBIN}/cni${BINARY_POSTFIX} ]; then
 (
     echo Building cni
-    TMPDIR=$(mktemp -d)
+    TMPDIR=/buildroot
     trap cleanup EXIT
     WORKDIR=$TMPDIR/src/github.com/containernetworking/plugins
-    git clone --single-branch --depth=1 --branch=$VERSION_CNIPLUGINS https://github.com/rancher/plugins.git $WORKDIR
+    git clone --single-branch --depth=1 --branch=$VERSION_CNIPLUGINS https://github.com/k3s-vip/plugins.git $WORKDIR
     cd $WORKDIR
     rm -rf plugins/meta/flannel
     git clone --single-branch --depth=1 --branch=$VERSION_FLANNEL_PLUGIN https://github.com/flannel-io/cni-plugin.git plugins/meta/flannel
@@ -175,8 +170,10 @@ if [ ! -x ${INSTALLBIN}/cni${BINARY_POSTFIX} ]; then
 fi
 
 echo Building k3s
-cp -av manifests/* pkg/deploy/embed/
-cp -av build/static/* pkg/static/embed/
+embedFS=pkg/deploy/embed
+rm -rf $embedFS;cp -av manifests $embedFS
+embedFS=pkg/static/embed
+rm -rf $embedFS;cp -av build/static $embedFS
 CGO_CFLAGS="-DSQLITE_ENABLE_DBSTAT_VTAB=1 -DSQLITE_USE_ALLOCA=1" \
 CGO_ENABLED=1 "${GO}" build $BLDFLAGS -tags "$TAGS" -buildvcs=false -gcflags="all=${GCFLAGS}" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC" -o bin/k3s${BINARY_POSTFIX} ./cmd/server
 
