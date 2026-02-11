@@ -16,13 +16,15 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/config"
-	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/snap"
 	"go.etcd.io/etcd/server/v3/etcdserver/cindex"
+	etcderrors "go.etcd.io/etcd/server/v3/etcdserver/errors"
 	"go.etcd.io/etcd/server/v3/lease"
-	"go.etcd.io/etcd/server/v3/mvcc"
-	"go.etcd.io/etcd/server/v3/mvcc/backend"
-	"go.etcd.io/etcd/server/v3/wal"
+	"go.etcd.io/etcd/server/v3/storage"
+	"go.etcd.io/etcd/server/v3/storage/backend"
+	"go.etcd.io/etcd/server/v3/storage/mvcc"
+	"go.etcd.io/etcd/server/v3/storage/schema"
+	"go.etcd.io/etcd/server/v3/storage/wal"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -93,7 +95,7 @@ func (r *RemoteStore) Get(ctx context.Context, key string) (mvccpb.KeyValue, err
 	if len(resp.Kvs) == 1 {
 		return *resp.Kvs[0], nil
 	}
-	return mvccpb.KeyValue{}, etcdserver.ErrKeyNotFound
+	return mvccpb.KeyValue{}, etcderrors.ErrKeyNotFound
 }
 
 func (r *RemoteStore) Close() error {
@@ -215,16 +217,15 @@ func NewStore(dataDir string) (*Store, error) {
 	logrus.Infof("Opening etcd MVCC KV store at %s", path)
 
 	// open backend database
-	bcfg := backend.DefaultBackendConfig()
+	bcfg := backend.DefaultBackendConfig(logger)
 	bcfg.Path = path
-	bcfg.Logger = logger
 	bcfg.UnsafeNoFsync = true
 	bcfg.BatchInterval = 0
 	bcfg.BatchLimit = 0
 	be := backend.New(bcfg)
 
 	// get current index from backend
-	currentIndex, _ = cindex.ReadConsistentIndex(be.ReadTx())
+	currentIndex, _ = schema.ReadConsistentIndex(be.ReadTx())
 
 	// list snapshots from WAL dir
 	walSnaps, err := wal.ValidSnapshotEntries(cfg.Logger, cfg.WALDir())
@@ -250,7 +251,7 @@ func NewStore(dataDir string) (*Store, error) {
 			logrus.Warnf("MVCC database for snapshot index %d not available; data may be stale", latestIndex)
 		} else {
 			logrus.Infof("MVCC database restoring snapshot index %d from %s", latestIndex, path)
-			be, err = etcdserver.RecoverSnapshotBackend(cfg, be, *snapshot, true, etcdserver.NewBackendHooks(cfg.Logger, cindex.NewConsistentIndex(nil)))
+			be, err = storage.RecoverSnapshotBackend(cfg, be, *snapshot, true, storage.NewBackendHooks(cfg.Logger, cindex.NewConsistentIndex(nil)))
 			if err != nil {
 				be.Close()
 				return nil, err
@@ -292,5 +293,5 @@ func (s *Store) Get(ctx context.Context, key string) (mvccpb.KeyValue, error) {
 		return resp.KVs[0], nil
 	}
 
-	return mvccpb.KeyValue{}, etcdserver.ErrKeyNotFound
+	return mvccpb.KeyValue{}, etcderrors.ErrKeyNotFound
 }

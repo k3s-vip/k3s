@@ -14,6 +14,7 @@ import (
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/apps"
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/batch"
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/core"
+	"github.com/rancher/wrangler/v3/pkg/generated/controllers/discovery"
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/rbac"
 	"github.com/rancher/wrangler/v3/pkg/start"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -25,12 +26,13 @@ import (
 )
 
 type Context struct {
-	K3s   *k3s.Factory
-	Helm  *helm.Factory
-	Batch *batch.Factory
-	Apps  *apps.Factory
-	Auth  *rbac.Factory
-	Core  *core.Factory
+	K3s       *k3s.Factory
+	Helm      *helm.Factory
+	Batch     *batch.Factory
+	Apps      *apps.Factory
+	Auth      *rbac.Factory
+	Core      *core.Factory
+	Discovery *discovery.Factory
 
 	Event record.EventRecorder
 	K8s   kubernetes.Interface
@@ -39,7 +41,7 @@ type Context struct {
 
 func (c *Context) Start(ctx context.Context) error {
 	starters := []start.Starter{
-		c.K3s, c.Apps, c.Auth, c.Batch, c.Core,
+		c.K3s, c.Apps, c.Auth, c.Batch, c.Core, c.Discovery,
 	}
 	if c.Helm != nil {
 		starters = append(starters, c.Helm)
@@ -71,12 +73,13 @@ func NewContext(ctx context.Context, config *Config) (*Context, error) {
 	}
 
 	c := &Context{
-		K3s:   k3s.NewFactoryFromConfigOrDie(restConfig),
-		Auth:  rbac.NewFactoryFromConfigOrDie(restConfig),
-		Apps:  apps.NewFactoryFromConfigOrDie(restConfig),
-		Batch: batch.NewFactoryFromConfigOrDie(restConfig),
-		Core:  core.NewFactoryFromConfigOrDie(restConfig),
-		Helm:  hf,
+		K3s:       k3s.NewFactoryFromConfigOrDie(restConfig),
+		Auth:      rbac.NewFactoryFromConfigOrDie(restConfig),
+		Apps:      apps.NewFactoryFromConfigOrDie(restConfig),
+		Batch:     batch.NewFactoryFromConfigOrDie(restConfig),
+		Core:      core.NewFactoryFromConfigOrDie(restConfig),
+		Discovery: discovery.NewFactoryFromConfigOrDie(restConfig),
+		Helm:      hf,
 
 		Event: util.BuildControllerEventRecorder(k8s, version.Program+"-supervisor", metav1.NamespaceAll),
 		K8s:   k8s,

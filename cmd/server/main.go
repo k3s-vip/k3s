@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"os"
 	"path/filepath"
 
@@ -22,7 +20,6 @@ import (
 	ctr2 "github.com/k3s-io/k3s/pkg/ctr"
 	kubectl2 "github.com/k3s-io/k3s/pkg/kubectl"
 	"github.com/moby/sys/reexec"
-	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	crictl2 "sigs.k8s.io/cri-tools/cmd/crictl"
 
@@ -85,7 +82,5 @@ func main() {
 		),
 	}
 
-	if err := app.Run(configfilearg.MustParse(os.Args)); err != nil && !errors.Is(err, context.Canceled) {
-		logrus.Fatalf("Error: %v", err)
-	}
+	cmds.MustRun(app, configfilearg.MustParse(os.Args))
 }

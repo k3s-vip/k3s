@@ -239,6 +239,7 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 		logrus.Warnf("Unable to take snapshot: not supported for learner")
 		return nil, nil
 	}
+	e.defragment(ctx)
 
 	snapshotDir, err := snapshotDir(e.config, true)
 	if err != nil {
@@ -264,7 +265,7 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 	var sf *snapshot.File
 
 	saveStart := time.Now()
-	err = snapshotv3.Save(ctx, e.client.GetLogger(), *cfg, snapshotPath)
+	_, err = snapshotv3.SaveWithVersion(ctx, e.client.GetLogger(), *cfg, snapshotPath)
 	metrics.ObserveWithStatus(snapshotmetrics.SaveLocalCount, saveStart, err)
 
 	if err != nil {
