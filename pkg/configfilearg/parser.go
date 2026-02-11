@@ -93,7 +93,7 @@ func (p *Parser) stripInvalidFlags(command string, args []string) ([]string, err
 		if validFlags[mArg] {
 			result = append(result, arg)
 		} else {
-			logrus.Warnf("Unknown flag %s found in config.yaml, skipping\n", strings.Split(arg, "=")[0])
+			logrus.Debug("Unknown flag %s found in config.yaml, skipping\n", strings.Split(arg, "=")[0])
 		}
 	}
 	return result, nil
