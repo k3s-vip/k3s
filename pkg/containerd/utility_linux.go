@@ -3,8 +3,8 @@
 package containerd
 
 import (
-	"github.com/containerd/containerd/v2/plugins/snapshots/overlay/overlayutils"
-	fuseoverlayfs "github.com/containerd/fuse-overlayfs-snapshotter/v2"
+	"github.com/containerd/containerd/snapshots/overlay/overlayutils"
+	fuseoverlayfs "github.com/containerd/fuse-overlayfs-snapshotter"
 	stargz "github.com/containerd/stargz-snapshotter/service"
 )
 

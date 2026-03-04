@@ -3,9 +3,7 @@
 package templates
 
 import (
-	"encoding/json"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"text/template"
 )
@@ -22,9 +20,4 @@ var templateFuncs = template.FuncMap{
 		}
 		return s
 	},
-	"toJson": func(v any) string {
-		output, _ := json.Marshal(v)
-		return string(output)
-	},
-	"filepathjoin": filepath.Join,
 }
