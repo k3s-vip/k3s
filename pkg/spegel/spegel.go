@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/containerd/remotes/docker"
 	"github.com/go-logr/logr"
 	leveldb "github.com/ipfs/go-ds-leveldb"
 	ipfslog "github.com/ipfs/go-log/v2"
