@@ -18,8 +18,8 @@ CONTAINERD_DIR=build/src/github.com/containerd/containerd
 HCSSHIM_DIR=build/src/github.com/microsoft/hcsshim
 PLUGINS_DIR=build/src/github.com/containernetworking/plugins
 
-PKG_CONTAINERD_K3S=$(get-module-path github.com/containerd/containerd/v2)
-VERSION_CONTAINERD=$(get-module-version github.com/containerd/containerd/v2)
+PKG_CONTAINERD_K3S=$(get-module-path github.com/containerd/containerd)
+VERSION_CONTAINERD=$(get-module-version github.com/containerd/containerd)
 if [ -z "$VERSION_CONTAINERD" ]; then
     VERSION_CONTAINERD="v0.0.0"
 fi
