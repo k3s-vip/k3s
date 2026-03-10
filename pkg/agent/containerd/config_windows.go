@@ -5,7 +5,7 @@ package containerd
 import (
 	"net"
 
-	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd"
 	"github.com/k3s-io/k3s/pkg/agent/templates"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/util/errors"
