@@ -11,12 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/containerd/v2/pkg/labels"
-	"github.com/containerd/containerd/v2/pkg/namespaces"
-	"github.com/containerd/errdefs"
+	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/labels"
+	"github.com/containerd/containerd/namespaces"
 	docker "github.com/distribution/reference"
 	reference "github.com/google/go-containerregistry/pkg/name"
 	"github.com/k3s-io/k3s/pkg/agent/cri"
@@ -386,13 +386,11 @@ func labelContent(ctx context.Context, client *containerd.Client, images []image
 				Digest: digest,
 				Labels: map[string]string{},
 			}
-			paths := []string{}
 			for _, registry := range registries {
-				paths = append(paths, "labels."+labels.LabelDistributionSource+"."+registry)
 				info.Labels[labels.LabelDistributionSource+"."+registry] = docker.Path(name)
 			}
 
-			if _, err := contentStore.Update(ctx, info, paths...); err != nil {
+			if _, err := contentStore.Update(ctx, info, "labels"); err != nil {
 				if !errdefs.IsNotFound(err) {
 					errs = append(errs, errors.WithMessage(err, "failed to add source labels to content with digest "+digest.String()))
 				}
