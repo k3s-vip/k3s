@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,7 +54,7 @@ const (
 )
 
 var (
-	DefaultLBImage = "rancher/klipper-lb:v0.4.15"
+	DefaultLBImage = "rancher/klipper-lb:v0.4.17"
 )
 
 func (k *k3s) Register(ctx context.Context,
@@ -388,8 +388,8 @@ func filterByIPFamily(ips []string, svc *core.Service) ([]string, error) {
 		}
 	}
 
-	sort.Strings(ipv4Addresses)
-	sort.Strings(ipv6Addresses)
+	slices.Sort(ipv4Addresses)
+	slices.Sort(ipv6Addresses)
 
 	for _, ipFamily := range svc.Spec.IPFamilies {
 		switch ipFamily {
@@ -488,11 +488,6 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 					AutomountServiceAccountToken: utilsptr.To(false),
 					SecurityContext:              securityContext,
 					Tolerations: []core.Toleration{
-						{
-							Key:      util.MasterRoleLabelKey,
-							Operator: "Exists",
-							Effect:   "NoSchedule",
-						},
 						{
 							Key:      util.ControlPlaneRoleLabelKey,
 							Operator: "Exists",
