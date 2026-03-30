@@ -54,6 +54,7 @@ type Server struct {
 	ExtraSchedulerArgs       cli.StringSlice
 	ExtraControllerArgs      cli.StringSlice
 	ExtraCloudControllerArgs cli.StringSlice
+	ExtraHelmArgs            cli.StringSlice
 	Rootless                 bool
 	DatastoreEndpoint        string
 	DatastoreCAFile          string
@@ -150,7 +151,7 @@ var (
 	}
 	ClusterDNS = &cli.StringSliceFlag{
 		Name:        "cluster-dns",
-		Usage:       "(networking) IPv4 Cluster IP for coredns service. Should be in your service-cidr range (default: 10.43.0.10)",
+		Usage:       "(networking) IPv4/IPv6 Cluster IP for coredns service. Should be in your service-cidr range (default: 10.43.0.10)",
 		Destination: &ServerConfig.ClusterDNS,
 	}
 	ClusterDomain = &cli.StringFlag{
@@ -178,6 +179,11 @@ var (
 		Name:        "kube-controller-manager-arg",
 		Usage:       "(flags) Customized flag for kube-controller-manager process",
 		Destination: &ServerConfig.ExtraControllerArgs,
+	}
+	ExtraHelmArgs = &cli.StringSliceFlag{
+		Name:        "helm-controller-arg",
+		Usage:       "(flags) Customized flag for helm-controller process",
+		Destination: &ServerConfig.ExtraHelmArgs,
 	}
 )
 
@@ -292,7 +298,7 @@ var ServerFlags = []cli.Flag{
 	},
 	&cli.StringFlag{
 		Name:        "helm-job-image",
-		Usage:       "(helm) Default image to use for helm jobs",
+		Usage:       "(helm) (deprecated) Default image to use for helm jobs. Use --helm-controller-arg=default-job-image instead",
 		Destination: &ServerConfig.HelmJobImage,
 	},
 	ServerToken,
@@ -342,6 +348,7 @@ var ServerFlags = []cli.Flag{
 	ExtraEtcdArgs,
 	ExtraControllerArgs,
 	ExtraSchedulerArgs,
+	ExtraHelmArgs,
 	&cli.StringSliceFlag{
 		Name:        "kube-cloud-controller-manager-arg",
 		Usage:       "(flags) Customized flag for kube-cloud-controller-manager process",

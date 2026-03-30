@@ -15,6 +15,7 @@
 package flannel
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 	"net"
@@ -26,11 +27,12 @@ import (
 	"github.com/flannel-io/flannel/pkg/backend"
 	"github.com/flannel-io/flannel/pkg/ip"
 	"github.com/flannel-io/flannel/pkg/subnet/kube"
+	"github.com/flannel-io/flannel/pkg/trafficmngr"
 	"github.com/flannel-io/flannel/pkg/trafficmngr/iptables"
+	"github.com/flannel-io/flannel/pkg/trafficmngr/nftables"
 	"github.com/joho/godotenv"
 	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 
 	// Backends need to be imported for their init() to get executed and them to register
 	_ "github.com/flannel-io/flannel/pkg/backend/extension"
@@ -89,7 +91,16 @@ func flannel(ctx context.Context, wg *sync.WaitGroup, flannelIface *net.Interfac
 	if err != nil {
 		return errors.WithMessage(err, "failed to register flannel network")
 	}
-	trafficMngr := &iptables.IPTablesManager{}
+
+	// Instanciate a TrafficManager to clean-up the rules of the backend we don't use
+	// This is to ensure a clean state in case flannel is restarted with a different choice
+	cleanupMngr := newTrafficManager(!config.EnableNFTables)
+	err = cleanupMngr.CleanUp(ctx)
+	if err != nil {
+		return errors.WithMessage(err, "failed to clean up flannel network")
+	}
+	//Create TrafficManager and instantiate it based on whether we use iptables or nftables
+	trafficMngr := newTrafficManager(config.EnableNFTables)
 	err = trafficMngr.Init(ctx)
 	if err != nil {
 		return errors.WithMessage(err, "failed to initialize flannel ipTables manager")
@@ -119,14 +130,13 @@ func flannel(ctx context.Context, wg *sync.WaitGroup, flannelIface *net.Interfac
 	trafficMngr.SetupAndEnsureForwardRules(ctx, config.Network, config.IPv6Network, 50)
 
 	if err := WriteSubnetFile(subnetFile, config.Network, config.IPv6Network, true, bn, nm); err != nil {
-		// Continue, even though it failed.
-		logrus.Warningf("Failed to write flannel subnet file: %s", err)
+		return errors.WithMessage(err, "failed to write flannel subnet file")
 	} else {
 		logrus.Infof("Wrote flannel subnet file to %s", subnetFile)
 	}
 
 	// Start "Running" the backend network. This will block until the context is done so run in another goroutine.
-	logrus.Info("Running flannel backend.")
+	logrus.Info("Running flannel backend")
 	bn.Run(ctx)
 	return nil
 }
@@ -175,6 +185,7 @@ func LookupExtInterface(iface *net.Interface, nm netMode) (*backend.ExternalInte
 
 	return &backend.ExternalInterface{
 		Iface:       iface,
+		IfaceName:   iface.Name,
 		IfaceAddr:   ifaceAddr[0],
 		IfaceV6Addr: ifacev6Addr[0],
 		ExtAddr:     ifaceAddr[0],
@@ -187,7 +198,7 @@ func LookupExtInterface(iface *net.Interface, nm netMode) (*backend.ExternalInte
 // from crashes, unexpected permissions/ownership) and to ensure clean atomic
 // rename semantics with O_EXCL guarantees.
 func WriteSubnetFile(path string, nw ip.IP4Net, nwv6 ip.IP6Net, ipMasq bool, bn backend.Network, nm netMode) error {
-	dir, name := filepath.Split(path)
+	dir := filepath.Dir(path)
 	if dir == "" {
 		dir = "."
 	}
@@ -200,66 +211,27 @@ func WriteSubnetFile(path string, nw ip.IP4Net, nwv6 ip.IP6Net, ipMasq bool, bn 
 	if info, err := os.Stat(path); err == nil {
 		perm = info.Mode().Perm()
 	}
-
-	f, err := os.CreateTemp(dir, "."+name+".")
-	if err != nil {
-		return err
-	}
-	tempFile := f.Name()
-	cleanupNoClose := func(err error) error {
-		return errors.Join(err, os.Remove(tempFile))
-	}
-	cleanup := func(err error) error {
-		return errors.Join(err, f.Close(), os.Remove(tempFile))
-	}
-	if err := f.Chmod(perm); err != nil {
-		return cleanup(err)
-	}
+	b := []byte{}
 
 	// Write out the first usable IP by incrementing
 	// sn.IP by one
-	sn := bn.Lease().Subnet
-	sn.IP++
 	if nm.IPv4Enabled() {
-		if _, err := fmt.Fprintf(f, "FLANNEL_NETWORK=%s\n", nw); err != nil {
-			return cleanup(err)
-		}
-		if _, err := fmt.Fprintf(f, "FLANNEL_SUBNET=%s\n", sn); err != nil {
-			return cleanup(err)
-		}
+		// Write out the first usable IP by incrementing sn.IP by one
+		sn := bn.Lease().Subnet
+		sn.IncrementIP()
+		b = fmt.Appendf(b, "FLANNEL_NETWORK=%s\nFLANNEL_SUBNET=%s\n", nw, sn)
 	}
 
 	if nwv6.String() != emptyIPv6Network {
+		// Write out the first usable IP by incrementing ip6Sn.IP by one
 		snv6 := bn.Lease().IPv6Subnet
 		snv6.IncrementIP()
-		if _, err := fmt.Fprintf(f, "FLANNEL_IPV6_NETWORK=%s\n", nwv6); err != nil {
-			return cleanup(err)
-		}
-		if _, err := fmt.Fprintf(f, "FLANNEL_IPV6_SUBNET=%s\n", snv6); err != nil {
-			return cleanup(err)
-		}
+		b = fmt.Appendf(b, "FLANNEL_IPV6_NETWORK=%s\nFLANNEL_IPV6_SUBNET=%s\n", nwv6, snv6)
 	}
 
-	if _, err := fmt.Fprintf(f, "FLANNEL_MTU=%d\n", bn.MTU()); err != nil {
-		return cleanup(err)
-	}
-	if _, err := fmt.Fprintf(f, "FLANNEL_IPMASQ=%v\n", ipMasq); err != nil {
-		return cleanup(err)
-	}
-	if err := f.Sync(); err != nil {
-		return cleanup(err)
-	}
-	if err := f.Close(); err != nil {
-		return cleanupNoClose(err)
-	}
+	b = fmt.Appendf(b, "FLANNEL_MTU=%d\nFLANNEL_IPMASQ=%t\n", bn.MTU(), ipMasq)
 
-	// rename(2) the temporary file to the desired location so that it becomes
-	// atomically visible with the contents (same directory keeps it on the same FS)
-	if err := os.Rename(tempFile, path); err != nil {
-		_ = os.Remove(tempFile)
-		return err
-	}
-	return nil
+	return writeFile(path, b, perm)
 }
 
 // ReadCIDRFromSubnetFile reads the flannel subnet file and extracts the value of IPv4 network key
@@ -328,4 +300,12 @@ func ReadIP6CIDRsFromSubnetFile(path string, key string) []ip.IP6Net {
 		}
 	}
 	return prevCIDRs
+}
+
+func newTrafficManager(useNftables bool) trafficmngr.TrafficManager {
+	if useNftables {
+		return &nftables.NFTablesManager{}
+	} else {
+		return &iptables.IPTablesManager{}
+	}
 }

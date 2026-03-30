@@ -36,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/pager"
 	"k8s.io/client-go/util/retry"
@@ -124,7 +125,7 @@ func (e *ETCD) compressSnapshot(snapshotDir, snapshotFilename string, mtime time
 		return "", err
 	}
 
-	of, err := os.Create(zipPath)
+	of, err := os.OpenFile(zipPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return "", err
 	}
@@ -249,6 +250,11 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 		logrus.Warnf("Unable to take snapshot: not supported for learner")
 		return nil, nil
 	}
+	_, err = e.client.Defragment(ctx, endpoints[0])
+	if err != nil {
+		logrus.Warnf("Unable to defragment etcd: %v", err)
+		return nil, errors.WithMessage(err, "failed to defragment etcd for snapshot")
+	}
 
 	snapshotDir, err := snapshotDir(e.config, true)
 	if err != nil {
@@ -274,7 +280,7 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 	var sf *snapshot.File
 
 	saveStart := time.Now()
-	err = snapshotv3.Save(ctx, e.client.GetLogger(), *cfg, snapshotPath)
+	_, err = snapshotv3.SaveWithVersion(ctx, e.client.GetLogger(), *cfg, snapshotPath)
 	metrics.ObserveWithStatus(snapshotmetrics.SaveLocalCount, saveStart, err)
 
 	if err != nil {
@@ -347,10 +353,10 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 
 		// Snapshot retention may prune some files before returning an error. Failing to prune is not fatal.
 		deleted, err := snapshotRetention(e.config.EtcdSnapshotRetention, e.config.EtcdSnapshotName, snapshotDir)
-		if err != nil {
-			logrus.Warnf("Failed to apply local snapshot retention policy: %v", err)
-		}
 		res.Deleted = append(res.Deleted, deleted...)
+		if err != nil {
+			e.warningEventf("ETCDSnapshotRetentionFailedLocal", "Failed to apply local snapshot retention policy: %v", err)
+		}
 
 		if e.config.EtcdS3 != nil {
 			s3Start := time.Now()
@@ -390,7 +396,7 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 				deleted, err := s3client.SnapshotRetention(ctx, e.config.EtcdSnapshotName)
 				res.Deleted = append(res.Deleted, deleted...)
 				if err != nil {
-					logrus.Warnf("Failed to apply s3 snapshot retention policy: %v", err)
+					e.warningEventf("ETCDSnapshotRetentionFailedS3", "Failed to apply S3 snapshot retention policy: %v", err)
 				}
 			}
 			// sf is either s3 snapshot metadata, or s3 init/upload failure record.
@@ -650,7 +656,7 @@ func (e *ETCD) addSnapshotData(sf snapshot.File) error {
 			created, err = snapshots.Create(esf)
 			if err == nil {
 				// Only emit an event for the snapshot when creating the resource
-				e.emitEvent(created)
+				e.snapshotEvent(created)
 			}
 		} else if !equality.Semantic.DeepEqual(existing, esf) {
 			_, err = snapshots.Update(esf)
@@ -669,7 +675,8 @@ func generateETCDSnapshotFileConfigMapKey(esf k3s.ETCDSnapshotFile) string {
 	return "local-" + name
 }
 
-func (e *ETCD) emitEvent(esf *k3s.ETCDSnapshotFile) {
+// snapshotEvent emits an Event attached to the EtcdSnapshotFile resource
+func (e *ETCD) snapshotEvent(esf *k3s.ETCDSnapshotFile) {
 	switch {
 	case e.config.Runtime.Event == nil:
 	case !esf.DeletionTimestamp.IsZero():
@@ -682,6 +689,23 @@ func (e *ETCD) emitEvent(esf *k3s.ETCDSnapshotFile) {
 		e.config.Runtime.Event.Event(esf, v1.EventTypeWarning, "ETCDSnapshotFailed", message)
 	default:
 		e.config.Runtime.Event.Eventf(esf, v1.EventTypeNormal, "ETCDSnapshotCreated", "Snapshot %s saved on %s", esf.Spec.SnapshotName, esf.Spec.NodeName)
+	}
+}
+
+// warningEventf emits a warning Event attached to the Node resource,
+// or directly logs a warning if the event recorder is not available.
+func (e *ETCD) warningEventf(reason, messageFmt string, args ...any) {
+	nodeName := os.Getenv("NODE_NAME")
+	if nodeName != "" && e.config.Runtime.Event != nil {
+		nodeRef := &v1.ObjectReference{
+			Kind:      "Node",
+			Name:      nodeName,
+			UID:       types.UID(nodeName),
+			Namespace: "",
+		}
+		e.config.Runtime.Event.Eventf(nodeRef, v1.EventTypeWarning, reason, messageFmt, args...)
+	} else {
+		logrus.Warnf(messageFmt, args...)
 	}
 }
 

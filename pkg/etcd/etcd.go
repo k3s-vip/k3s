@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
@@ -47,7 +46,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/credentials"
 	snapshotv3 "go.etcd.io/etcd/etcdutl/v3/snapshot"
-	"go.etcd.io/etcd/server/v3/etcdserver"
+	errorsv3 "go.etcd.io/etcd/server/v3/etcdserver/errors"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -136,7 +135,7 @@ type membershipError struct {
 }
 
 func (e *membershipError) Error() string {
-	return fmt.Sprintf("this server is a not a member of the etcd cluster. Found %v, expect: %s", e.members, e.self)
+	return fmt.Sprintf("this server is not a member of the etcd cluster. Found %v, expect: %s", e.members, e.self)
 }
 
 func (e *membershipError) Is(target error) bool {
@@ -190,11 +189,12 @@ func (e *ETCD) SetControlConfig(config *config.Control) error {
 	return nil
 }
 
-// Test ensures that the local node is a voting member of the target cluster,
-// and that the datastore is defragmented and not in maintenance mode due to alarms.
+// Test ensures that the local node is a voting member of the target cluster
+// and not in maintenance mode due to alarms.
 // If it is still a learner or not a part of the cluster, an error is raised.
-// If enableMaintenance is true, an attempt will be made to defagment the datastore and clear alarms.
-// If it cannot be defragmented or has any alarms that cannot be disarmed, an error is raised.
+// If enableMaintenance is true, an attempt will be made to clear alarms.
+// Startup defragmentation is delegated to etcd itself via the
+// bootstrap-defrag-threshold-megabytes flag.
 func (e *ETCD) Test(ctx context.Context, enableMaintenance bool) error {
 	if e.config == nil {
 		return errors.New("control config not set")
@@ -209,7 +209,7 @@ func (e *ETCD) Test(ctx context.Context, enableMaintenance bool) error {
 	} else if status.IsLearner {
 		return errors.New("this server has not yet been promoted from learner to voting member")
 	} else if status.Leader == 0 {
-		return etcdserver.ErrNoLeader
+		return errorsv3.ErrNoLeader
 	}
 
 	logrus.Infof("Connected to etcd v%s - datastore using %d of %d bytes", status.Version, status.DbSizeInUse, status.DbSize)
@@ -222,26 +222,9 @@ func (e *ETCD) Test(ctx context.Context, enableMaintenance bool) error {
 		return nil
 	}
 
-	// defrag this node to reclaim freed space from compacted revisions
-	if err := e.defragment(ctx); err != nil {
-		return errors.WithMessage(err, "failed to defragment etcd database")
-	}
-
 	// clear alarms on this node
 	if err := e.clearAlarms(ctx, status.Header.MemberId); err != nil {
 		return errors.WithMessage(err, "failed to disarm etcd alarms")
-	}
-
-	// refresh status - note that errors may remain on other nodes, but this
-	// should not prevent us from continuing with startup.
-	status, err = e.status(ctx)
-	if err != nil {
-		return errors.WithMessage(err, "failed to get etcd status")
-	}
-
-	logrus.Infof("Datastore using %d of %d bytes after defragment", status.DbSizeInUse, status.DbSize)
-	if len(status.Errors) > 0 {
-		logrus.Warnf("Errors present on etcd cluster after defragment: %s", strings.Join(status.Errors, ","))
 	}
 
 	members, err := e.client.MemberList(ctx)
@@ -730,7 +713,7 @@ func (e *ETCD) setName(force bool) error {
 		if e.config.ServerNodeName == "" {
 			return errors.New("server node name not set")
 		}
-		e.name = e.config.ServerNodeName + "-" + uuid.New().String()[:8]
+		e.name = e.EndpointName() + strings.ReplaceAll(e.address, ".", "-")
 		if err := os.MkdirAll(filepath.Dir(fileName), 0700); err != nil {
 			return err
 		}
@@ -817,7 +800,7 @@ func getClient(ctx context.Context, control *config.Control, endpoints ...string
 	}
 
 	if cfg.TLS != nil {
-		creds := credentials.NewBundle(credentials.Config{TLSConfig: cfg.TLS}).TransportCredentials()
+		creds := credentials.NewTransportCredential(cfg.TLS)
 		cfg.DialOptions = append(cfg.DialOptions, grpc.WithTransportCredentials(creds))
 	} else {
 		cfg.DialOptions = append(cfg.DialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -1061,12 +1044,13 @@ func (e *ETCD) cluster(ctx context.Context, wg *sync.WaitGroup, reset bool, opti
 			ClientCertAuth: true,
 			TrustedCAFile:  e.config.Runtime.ETCDPeerCA,
 		},
-		SnapshotCount:        10000,
-		ElectionTimeout:      5000,
-		HeartbeatInterval:    500,
-		Logger:               "zap",
-		LogOutputs:           []string{"stderr"},
-		ListenClientHTTPURLs: e.listenClientHTTPURLs(),
+		SnapshotCount:                     10000,
+		ElectionTimeout:                   5000,
+		HeartbeatInterval:                 500,
+		BootstrapDefragThresholdMegabytes: 100,
+		Logger:                            "zap",
+		LogOutputs:                        []string{"stderr"},
+		ListenClientHTTPURLs:              e.listenClientHTTPURLs(),
 		SocketOpts: executor.ETCDSocketOpts{
 			ReuseAddress: true,
 			ReusePort:    true,
@@ -1173,8 +1157,10 @@ func (e *ETCD) manageLearners(ctx context.Context) {
 			return
 		}
 
+		client := e.client
+
 		endpoints := getEndpoints(e.config)
-		if status, err := e.client.Status(ctx, endpoints[0]); err != nil {
+		if status, err := client.Status(ctx, endpoints[0]); err != nil {
 			logrus.Errorf("Failed to check local etcd status for learner management: %v", err)
 			return
 		} else if status.Header.MemberId != status.Leader {
@@ -1187,7 +1173,7 @@ func (e *ETCD) manageLearners(ctx context.Context) {
 			return
 		}
 
-		members, err := e.client.MemberList(ctx)
+		members, err := client.MemberList(ctx)
 		if err != nil {
 			logrus.Errorf("Failed to get etcd members for learner management: %v", err)
 			return
@@ -1466,18 +1452,6 @@ func (e *ETCD) status(ctx context.Context) (*clientv3.StatusResponse, error) {
 
 	endpoints := getEndpoints(e.config)
 	return e.client.Status(ctx, endpoints[0])
-}
-
-// defragment defragments the etcd datastore using the first etcd endpoint
-func (e *ETCD) defragment(ctx context.Context) error {
-	if e.client == nil {
-		return errors.New("etcd client was nil")
-	}
-
-	logrus.Infof("Defragmenting etcd database")
-	endpoints := getEndpoints(e.config)
-	_, err := e.client.Defragment(ctx, endpoints[0])
-	return err
 }
 
 // clientURLs returns a list of all non-learner etcd cluster member client access URLs.
