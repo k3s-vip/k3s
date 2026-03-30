@@ -9,7 +9,7 @@ import (
 
 	"github.com/k3s-io/k3s/pkg/datadir"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/rancher/wrangler/v3/pkg/ratelimit"
+	"github.com/rancher/wrangler/pkg/ratelimit"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	clientset "k8s.io/client-go/kubernetes"

@@ -114,7 +114,7 @@ func (c *agentBootstrapper) Run(ctx context.Context, id peer.AddrInfo) error {
 		return errors.WithMessage(err, "failed to create kubernetes client")
 	}
 
-	go wait.PollUntilContextCancel(ctx, 1*time.Second, true, func(ctx context.Context) (bool, error) {
+	go wait.PollImmediateUntilWithContext(ctx, 1*time.Second, func(ctx context.Context) (bool, error) {
 		nodeName := os.Getenv("NODE_NAME")
 		if nodeName == "" {
 			return false, nil
