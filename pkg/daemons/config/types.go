@@ -12,6 +12,7 @@ import (
 	"github.com/k3s-io/kine/pkg/endpoint"
 	"github.com/rancher/wharfie/pkg/registries"
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/core"
+	"github.com/rancher/wrangler/v3/pkg/generated/controllers/discovery"
 	"github.com/rancher/wrangler/v3/pkg/leader"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
@@ -120,6 +121,7 @@ type Agent struct {
 	ClusterDomain           string
 	ResolvConf              string
 	RootDir                 string
+	KubeletConfig           string
 	KubeletConfigDir        string
 	KubeConfigKubelet       string
 	KubeConfigKubeProxy     string
@@ -379,8 +381,9 @@ type ControlRuntime struct {
 	ClientETCDKey            string
 
 	K8s        kubernetes.Interface
-	K3s        *k3s.Factory
+	K3s        K3sFactory
 	Core       CoreFactory
+	Discovery  DiscoveryFactory
 	Event      record.EventRecorder
 	EtcdConfig endpoint.ETCDConfig
 }
@@ -391,8 +394,20 @@ type Cluster interface {
 	Start(ctx context.Context, wg *sync.WaitGroup) error
 }
 
+type K3sFactory interface {
+	K3s() k3s.Interface
+	Sync(ctx context.Context) error
+	Start(ctx context.Context, defaultThreadiness int) error
+}
+
 type CoreFactory interface {
 	Core() core.Interface
+	Sync(ctx context.Context) error
+	Start(ctx context.Context, defaultThreadiness int) error
+}
+
+type DiscoveryFactory interface {
+	Discovery() discovery.Interface
 	Sync(ctx context.Context) error
 	Start(ctx context.Context, defaultThreadiness int) error
 }

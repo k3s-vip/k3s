@@ -22,9 +22,6 @@ import (
 	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/util/mux"
 	"github.com/k3s-io/k3s/pkg/util/permissions"
-	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/k3s-io/k3s/pkg/vpn"
-	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	"k8s.io/klog/v2"
 )
@@ -49,7 +46,7 @@ func Run(clx *cli.Context) (rerr error) {
 	}
 
 	klog.EnableContextualLogging(true)
-	ctx := klog.NewContext(signals.SetupSignalContext(), logger.NewLogrusSink(nil).AsLogr())
+	ctx := logger.NewContext(signals.SetupSignalContext(), "agent")
 	wg := &sync.WaitGroup{}
 
 	// If exiting due to an error, ensure that contexts are cancelled so that the
@@ -72,7 +69,7 @@ func Run(clx *cli.Context) (rerr error) {
 	}
 
 	if cmds.AgentConfig.TokenFile != "" {
-		token, err := util.ReadFile(cmds.AgentConfig.TokenFile)
+		token, err := util.ReadFile(ctx, cmds.AgentConfig.TokenFile)
 		if err != nil {
 			return err
 		}
@@ -99,8 +96,6 @@ func Run(clx *cli.Context) (rerr error) {
 		cmds.AgentConfig.NodeIP.Set(ip)
 	}
 
-	logrus.Info("Starting " + version.Program + " agent " + clx.App.Version)
-
 	dataDir, err := datadir.LocalHome(cmds.AgentConfig.DataDir, cmds.AgentConfig.Rootless)
 	if err != nil {
 		return err
@@ -111,20 +106,6 @@ func Run(clx *cli.Context) (rerr error) {
 	cfg.DataDir = dataDir
 
 	go cmds.WriteCoverage(ctx)
-	if cfg.VPNAuthFile != "" {
-		cfg.VPNAuth, err = util.ReadFile(cfg.VPNAuthFile)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Starts the VPN in the agent if config was set up
-	if cfg.VPNAuth != "" {
-		err := vpn.StartVPN(cfg.VPNAuth)
-		if err != nil {
-			return err
-		}
-	}
 
 	// Until the agent is run and retrieves config from the server, we won't know
 	// if the embedded registry is enabled. If it is not enabled, these are not
