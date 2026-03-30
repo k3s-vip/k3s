@@ -48,7 +48,7 @@ func ReadFile(ctx context.Context, path string) (string, error) {
 		return "", nil
 	}
 	var trimmed string
-	return trimmed, wait.PollUntilContextTimeout(ctx, 2*time.Second, 4*time.Minute, true, func(ctx context.Context) (bool, error) {
+	return trimmed, wait.PollImmediateWithContext(ctx, 2*time.Second, 4*time.Minute, func(ctx context.Context) (bool, error) {
 		b, err := os.ReadFile(path)
 		if err == nil {
 			trimmed = strings.TrimSpace(string(b))
