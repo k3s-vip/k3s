@@ -35,9 +35,6 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
-        - key: "node-role.kubernetes.io/master"
-          operator: "Exists"
-          effect: "NoSchedule"
       nodeSelector:
         kubernetes.io/os: linux
       volumes:
@@ -46,7 +43,7 @@ spec:
         emptyDir: {}
       containers:
       - name: metrics-server
-        image: "%{SYSTEM_DEFAULT_REGISTRY}%rancher/mirrored-metrics-server:v0.8.1"
+        image: "registry.k8s.io/metrics-server/metrics-server:v0.8.1"
         args:
         - --cert-dir=/tmp
         - --secure-port=10250

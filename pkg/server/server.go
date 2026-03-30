@@ -128,6 +128,7 @@ func runControllers(ctx context.Context, config *Config) error {
 	controlConfig.Runtime.K3s = sc.K3s
 	controlConfig.Runtime.Event = sc.Event
 	controlConfig.Runtime.Core = sc.Core
+	controlConfig.Runtime.Discovery = sc.Discovery
 
 	// Create a new context to use for wrangler controllers that is
 	// cancelled on a delay after the signal context. This allows other things
@@ -249,7 +250,7 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 			strconv.Itoa(config.ControlConfig.HTTPSPort),
 			k8s,
 			apply,
-			util.BuildControllerEventRecorder(k8s, helmcommon.Name, metav1.NamespaceAll),
+			util.BuildControllerEventRecorder(ctx, k8s, helmcommon.Name, metav1.NamespaceAll),
 			helm.V1().HelmChart(),
 			helm.V1().HelmChart().Cache(),
 			helm.V1().HelmChartConfig(),
@@ -559,11 +560,9 @@ func setNodeLabelsAndAnnotations(ctx context.Context, nodes v1.NodeClient, confi
 			return false, nil
 		}
 
-		patch := util.NewPatchList()
-		patch.Add("true", "metadata", "labels", util.ControlPlaneRoleLabelKey)
-		patch.Add("true", "metadata", "labels", util.MasterRoleLabelKey)
+		patch := util.NewPatchList().Add("true", "metadata", "labels", util.ControlPlaneRoleLabelKey)
 		if _, err := patcher.Patch(ctx, patch, nodeName); err != nil {
-			logrus.Infof("Unable to set master and control-plane role labels: %v", err)
+			logrus.Infof("Unable to set control-plane role label: %v", err)
 			return false, nil
 		}
 
