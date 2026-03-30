@@ -54,7 +54,7 @@ const (
 )
 
 var (
-	DefaultLBImage = "rancher/klipper-lb:v0.4.15"
+	DefaultLBImage = "rancher/klipper-lb:v0.4.16"
 )
 
 func (k *k3s) Register(ctx context.Context,
@@ -488,11 +488,6 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 					AutomountServiceAccountToken: utilsptr.To(false),
 					SecurityContext:              securityContext,
 					Tolerations: []core.Toleration{
-						{
-							Key:      util.MasterRoleLabelKey,
-							Operator: "Exists",
-							Effect:   "NoSchedule",
-						},
 						{
 							Key:      util.ControlPlaneRoleLabelKey,
 							Operator: "Exists",
