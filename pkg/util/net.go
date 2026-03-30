@@ -143,7 +143,7 @@ func ChooseHostInterfaceWithRetry() (net.IP, error) {
 func ChooseHostInterfaceWithContext(ctx context.Context) (net.IP, error) {
 	var ip net.IP
 	first := true
-	err := wait.PollUntilContextTimeout(ctx, 5*time.Second, 60*time.Second, true, func(ctx context.Context) (bool, error) {
+	err := wait.PollImmediateWithContext(ctx, 5*time.Second, 60*time.Second, func(ctx context.Context) (bool, error) {
 		var err error
 		ip, err = apinet.ChooseHostInterface()
 		if err == nil {
