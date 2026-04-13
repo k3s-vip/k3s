@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/containerd/remotes/docker"
 	"github.com/go-logr/logr"
 	leveldb "github.com/ipfs/go-ds-leveldb"
 	ipfslog "github.com/ipfs/go-log/v2"
@@ -40,6 +40,7 @@ import (
 	"github.com/spegel-org/spegel/pkg/registry"
 	"github.com/spegel-org/spegel/pkg/routing"
 	routinglibp2p "github.com/spegel-org/spegel/pkg/routing/libp2p"
+	"github.com/spegel-org/spegel/pkg/web"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/component-base/metrics/legacyregistry"
@@ -59,7 +60,9 @@ var (
 	P2pEnabledLabel      = "p2p." + version.Program + ".cattle.io/enabled"
 	P2pPortEnv           = version.ProgramUpper + "_P2P_PORT"
 	P2pEnableLatestEnv   = version.ProgramUpper + "_P2P_ENABLE_LATEST"
+	P2PEnableDebugWebEnv = version.ProgramUpper + "_P2P_ENABLE_DEBUG_WEB"
 
+	enableDebugWeb   = false
 	resolveLatestTag = false
 
 	wildcardRegistries = []string{"_default", "*"}
@@ -150,6 +153,15 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 	if regFilter != nil {
 		filters = append(filters, *regFilter)
 	}
+
+	// get latest tag configuration override
+	if env := os.Getenv(P2pEnableLatestEnv); env != "" {
+		if b, err := strconv.ParseBool(env); err != nil {
+			logrus.Warnf("Invalid %s value; using default %v", P2pEnableLatestEnv, resolveLatestTag)
+		} else {
+			resolveLatestTag = b
+		}
+	}
 	if !resolveLatestTag {
 		filters = append(filters, oci.RegexFilter{Regex: regexp.MustCompile(`:latest$`)})
 	}
@@ -222,15 +234,6 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 		return errors.WithMessage(err, "failed to create peerstore")
 	}
 
-	// get latest tag configuration override
-	if env := os.Getenv(P2pEnableLatestEnv); env != "" {
-		if b, err := strconv.ParseBool(env); err != nil {
-			logrus.Warnf("Invalid %s value; using default %v", P2pEnableLatestEnv, resolveLatestTag)
-		} else {
-			resolveLatestTag = b
-		}
-	}
-
 	// get port and start p2p router
 	routerPort := defaultRouterPort
 	if env := os.Getenv(P2pPortEnv); env != "" {
@@ -251,15 +254,14 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 			libp2p.ChainOptions(libp2p.NoTransports, libp2p.Transport(tcp.NewTCPTransport)),
 		),
 	}
-	bootstrapper := NewNotSelfBootstrapper(c.Bootstrapper)
-	c.router, err = routinglibp2p.NewRouter(ctx, routerAddr, bootstrapper, routing.PeerMetadata{RegistryPort: uint16(c.RegistryPort)}, opts...)
+	c.router, err = routinglibp2p.NewRouter(ctx, routerAddr, NewNotSelfBootstrapper(c.Bootstrapper), routing.PeerMetadata{RegistryPort: uint16(c.RegistryPort)}, opts...)
 	if err != nil {
 		return errors.WithMessage(err, "failed to create P2P router")
 	}
 	go func() {
 		group, groupCtx := errgroup.WithContext(ctx)
 		group.Go(func() error {
-			return bootstrapper.Run(groupCtx, *host.InfoFromHost(c.router.Host()))
+			return c.Bootstrapper.Run(groupCtx, *host.InfoFromHost(c.router.Host()))
 		})
 		group.Go(func() error {
 			return c.router.Run(groupCtx)
@@ -307,6 +309,25 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 	mRouter, err := c.Router(ctx, nodeConfig)
 	if err != nil {
 		return err
+	}
+	if env := os.Getenv(P2PEnableDebugWebEnv); env != "" {
+		if b, err := strconv.ParseBool(env); err != nil {
+			logrus.Warnf("Invalid %s value; using default %v", P2PEnableDebugWebEnv, enableDebugWeb)
+		} else {
+			enableDebugWeb = b
+		}
+		if enableDebugWeb {
+			webOpts := []web.WebOption{
+				web.WithOCIClient(ociClient),
+			}
+			debugWebAddr := &url.URL{Scheme: "https", Host: c.ExternalAddress + regSvr.Addr}
+			debugWebSvr, err := web.NewWeb(c.router, ociStore, reg, debugWebAddr, webOpts...)
+			if err != nil {
+				return errors.WithMessage(err, "failed to create distributed registry debug web")
+			}
+			mRouter.Handle("/debug/web/", debugWebSvr.Handler(logr.FromContextOrDiscard(ctx)))
+			logrus.Info("Starting distributed registry debug web at ", debugWebAddr)
+		}
 	}
 	mRouter.Handle("/v2/", regSvr.Handler)
 	sRouter := mRouter.SubRouter("/v1-" + version.Program + "/p2p")
