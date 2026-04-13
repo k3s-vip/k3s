@@ -13,7 +13,6 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	cloudproviderapi "k8s.io/cloud-provider/api"
 
 	"github.com/cloudnativelabs/kube-router/v2/pkg/controllers/netpol"
@@ -81,14 +80,8 @@ func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error
 	// Wait until the ready condition is updated and the uninitialized taint has
 	// been removed, at which point the addresses should be synced.
 	startTime := time.Now().Truncate(time.Second)
-	if err := wait.PollUntilContextTimeout(ctx, 2*time.Second, util.DefaultAPIServerReadyTimeout, true, func(ctx context.Context) (bool, error) {
+	if err := util.WaitForNode(ctx, client, nodeConfig.AgentConfig.NodeName, func(node *v1.Node) (bool, error) {
 		var readyTime metav1.Time
-		// Get the node object
-		node, err := client.CoreV1().Nodes().Get(ctx, nodeConfig.AgentConfig.NodeName, metav1.GetOptions{})
-		if err != nil {
-			logrus.Infof("Network policy controller waiting to get Node %s: %v", nodeConfig.AgentConfig.NodeName, err)
-			return false, nil
-		}
 		for _, cond := range node.Status.Conditions {
 			if cond.Type == v1.NodeReady && cond.Status == v1.ConditionTrue {
 				readyTime = cond.LastHeartbeatTime
