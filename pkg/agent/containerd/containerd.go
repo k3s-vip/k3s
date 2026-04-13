@@ -11,12 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	containerd "github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/containerd/v2/pkg/labels"
-	"github.com/containerd/containerd/v2/pkg/namespaces"
-	"github.com/containerd/errdefs"
+	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/labels"
+	"github.com/containerd/containerd/leases"
+	"github.com/containerd/containerd/namespaces"
 	docker "github.com/distribution/reference"
 	reference "github.com/google/go-containerregistry/pkg/name"
 	"github.com/k3s-io/k3s/pkg/agent/cri"
@@ -185,11 +186,22 @@ func preloadFile(ctx context.Context, cfg *config.Node, client *containerd.Clien
 			return nil, err
 		}
 		defer imageReader.Close()
+		leaseID := "airgap-import." + filepath.Base(filePath)
+		_, err = client.LeasesService().Create(ctx, leases.WithID(leaseID))
+		if err != nil && !errdefs.IsAlreadyExists(err) {
+			return nil, errors.WithMessagef(err, "failed to create containerd lease %s", leaseID)
+		}
+		ctx = leases.WithLease(ctx, leaseID)
 
 		logrus.Infof("Importing images from %s", filePath)
-		images, err = client.Import(ctx, imageReader, containerd.WithAllPlatforms(true), containerd.WithSkipMissing())
+		images, err = client.Import(ctx, imageReader, containerd.WithAllPlatforms(true))
 		if err != nil {
 			return nil, errors.WithMessage(err, "failed to import images from "+filePath)
+		}
+		for _, image := range images {
+			if containerd.NewImage(client, image).Unpack(ctx, cfg.AgentConfig.Snapshotter) != nil {
+				return nil, errors.WithMessagef(err, "failed to unpack image %s", image.Name)
+			}
 		}
 	}
 
@@ -341,6 +353,18 @@ func isHostedBy(name docker.Named, registry string) bool {
 // forceCreateTag retags an image with the provided reference, replacing any image that
 // currently holds that name. If something else takes the name first, the tag is skipped.
 func forceCreateTag(ctx context.Context, imageService images.Store, image images.Image, targetRef string) error {
+	if existing, err := imageService.Get(ctx, targetRef); err == nil && existing.Target.Digest == image.Target.Digest {
+		if existing.Labels == nil {
+			existing.Labels = map[string]string{}
+		}
+		for k, v := range image.Labels {
+			existing.Labels[k] = v
+		}
+		if _, err = imageService.Update(ctx, existing, "labels"); err != nil {
+			return errors.WithMessagef(err, "failed to update image %s", targetRef)
+		}
+		return nil
+	}
 	image.Name = targetRef
 	if _, err := imageService.Create(ctx, image); err != nil {
 		if !errdefs.IsAlreadyExists(err) {
@@ -386,13 +410,11 @@ func labelContent(ctx context.Context, client *containerd.Client, images []image
 				Digest: digest,
 				Labels: map[string]string{},
 			}
-			paths := []string{}
 			for _, registry := range registries {
-				paths = append(paths, "labels."+labels.LabelDistributionSource+"."+registry)
 				info.Labels[labels.LabelDistributionSource+"."+registry] = docker.Path(name)
 			}
 
-			if _, err := contentStore.Update(ctx, info, paths...); err != nil {
+			if _, err := contentStore.Update(ctx, info, "labels"); err != nil {
 				if !errdefs.IsNotFound(err) {
 					errs = append(errs, errors.WithMessage(err, "failed to add source labels to content with digest "+digest.String()))
 				}
