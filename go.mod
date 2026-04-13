@@ -78,7 +78,6 @@ require (
 	github.com/cloudnativelabs/kube-router/v2 v2.0.0-00010101000000-000000000000
 	github.com/containerd/cgroups/v3 v3.1.3
 	github.com/containerd/containerd/api v1.12.0
-	github.com/containerd/containerd/v2 v2.4.2
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/fuse-overlayfs-snapshotter/v2 v2.1.7
 	github.com/containerd/stargz-snapshotter v0.18.2
@@ -102,7 +101,6 @@ require (
 	github.com/ipfs/go-log/v2 v2.9.2
 	github.com/joho/godotenv v1.5.1
 	github.com/json-iterator/go v1.1.12
-	github.com/k3s-io/api v0.2.1
 	github.com/k3s-io/helm-controller v0.17.9
 	github.com/k3s-io/kine v0.17.5
 	github.com/klauspost/compress v1.20.3

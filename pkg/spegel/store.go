@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/opencontainers/go-digest"
+	"github.com/spegel-org/spegel/pkg/oci"
 	"github.com/spegel-org/spegel/pkg/oci/containerd"
 	"github.com/spegel-org/spegel/pkg/store"
 )
@@ -16,6 +17,7 @@ var errStoreNotStarted = errors.New("deferred OCI Store not started")
 // to the backend. Functions are expected to return errors until the store
 // has been started.
 type DeferredStore interface {
+	oci.ImageLister
 	store.Provider
 	store.Watcher
 	io.Closer
@@ -35,6 +37,13 @@ func (ds *deferredStore) Name() string {
 		return "deferred"
 	}
 	return ds.store.Name()
+}
+
+func (ds *deferredStore) ListImages(ctx context.Context) ([]oci.Image, error) {
+	if ds.store == nil {
+		return nil, errStoreNotStarted
+	}
+	return ds.store.ListImages(ctx)
 }
 
 func (ds *deferredStore) Resolve(ctx context.Context, ref string) (digest.Digest, error) {
