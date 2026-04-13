@@ -42,10 +42,7 @@ func RotateBootstrapToken(ctx context.Context, config *config.Control, oldToken 
 	var bootstrapList []*mvccpb.KeyValue
 	if err := wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 		bootstrapList, err = storageClient.List(ctx, "/bootstrap", 0)
-		if err != nil {
-			return false, err
-		}
-		return true, nil
+		return err == nil, err
 	}); err != nil {
 		return err
 	}
