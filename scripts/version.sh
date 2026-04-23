@@ -5,9 +5,10 @@ ARCH=${ARCH:-$("${GO}" env GOARCH)}
 OS=${OS:-$("${GO}" env GOOS)}
 SUFFIX="-${ARCH}"
 
-if [ -z "$NO_DAPPER" ]; then
-    . ./scripts/git_version.sh
-fi
+DIRTY=""
+TREE_STATE=clean
+GIT_TAG=$(awk '/src\/k8s.io\/client-go/ {print $NF}' go.mod | awk -F- '{print $1}')+${OEM:-vip}
+COMMIT=$(git rev-parse HEAD)
 
 get-module-version(){
   go list -mod=readonly -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $1
@@ -29,7 +30,7 @@ if [ -z "$VERSION_CRICTL" ]; then
 fi
 
 VERSION_K8S_K3S=$(get-module-version k8s.io/kubernetes)
-VERSION_K8S=${VERSION_K8S_K3S%-k3s*}
+VERSION_K8S=${VERSION_K8S_K3S%-*}
 if [ -z "$VERSION_K8S" ]; then
     VERSION_K8S="v0.0.0"
 fi
@@ -58,7 +59,7 @@ if [ -z "$VERSION_CRI_DOCKERD" ]; then
   VERSION_CRI_DOCKERD="v0.0.0"
 fi
 
-VERSION_CNIPLUGINS="v1.9.1-k3s1"
+VERSION_CNIPLUGINS="v1.9.1-vip1"
 VERSION_FLANNEL_PLUGIN="v1.9.0-flannel1"
 
 VERSION_KUBE_ROUTER=$(get-module-version github.com/cloudnativelabs/kube-router/v2)
@@ -72,6 +73,7 @@ VERSION_HELM_JOB="v0.9.17-build20260422"
 
 GO_VERSION_URL="https://raw.githubusercontent.com/kubernetes/kubernetes/${BRANCH_K8S}/.go-version"
 VERSION_GOLANG="go"$(curl -sL "${GO_VERSION_URL}" | tr -d '[:space:]')
+VERSION_GOLANG="$(go version | awk '{print $3}')"
 
 if [[ -n "$GIT_TAG" ]]; then
     if [[ ! "$GIT_TAG" =~ ^"$VERSION_K8S"[+-] ]]; then

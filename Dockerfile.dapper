@@ -1,0 +1,37 @@
+ARG GOLANG=golang:1.25-alpine
+FROM ${GOLANG}
+
+# Install necessary packages
+RUN apk -U --no-cache add \
+    bash git gcc musl-dev docker vim less file curl wget ca-certificates jq linux-headers \
+    zlib-dev tar zip squashfs-tools npm coreutils python3 py3-pip openssl-dev libffi-dev libseccomp \
+    libseccomp-dev libseccomp-static make libuv-static sqlite-dev sqlite-static libselinux \
+    libselinux-dev zlib-dev zlib-static zstd pigz alpine-sdk btrfs-progs-dev \
+    btrfs-progs-static gawk yq pipx \
+    && [ "$(go env GOARCH)" = "arm64" ] && apk -U --no-cache add binutils-gold || true \
+    && [ "$(go env GOARCH)" = "amd64" ] && apk -U --no-cache add mingw-w64-gcc || true
+
+# Install AWS CLI
+RUN PIPX_BIN_DIR=/usr/local/bin pipx install awscli
+
+# Cleanup
+RUN rm -rf /go/src /go/pkg
+# Set SELINUX environment variable
+ARG SELINUX=true
+ENV SELINUX=${SELINUX}
+
+# Set Dapper configuration variables
+ENV DAPPER_RUN_ARGS="--privileged -v k3s-cache:/go/src/github.com/k3s-io/k3s/.cache -v trivy-cache:/root/.cache/trivy" \
+    DAPPER_ENV="OEM REPO TAG DRONE_TAG IMAGE_NAME SKIP_VALIDATE SKIP_IMAGE SKIP_AIRGAP AWS_SECRET_ACCESS_KEY AWS_ACCESS_KEY_ID GITHUB_TOKEN GOLANG GOCOVER GOOS DEBUG" \
+    DAPPER_SOURCE="/go/src/github.com/k3s-io/k3s/" \
+    DAPPER_OUTPUT="./bin ./dist ./build/out ./build/static ./pkg/static ./pkg/deploy" \
+    DAPPER_DOCKER_SOCKET=true \
+    CROSS=true \
+    STATIC_BUILD=true
+# Set $HOME separately because it refers to $DAPPER_SOURCE, set above
+ENV HOME=${DAPPER_SOURCE}
+
+WORKDIR ${DAPPER_SOURCE}
+
+ENTRYPOINT ["./scripts/entry.sh"]
+CMD ["ci"]
