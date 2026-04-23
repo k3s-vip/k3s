@@ -20,6 +20,7 @@ import (
 	"github.com/cloudnativelabs/kube-router/v2/pkg/healthcheck"
 	krmetrics "github.com/cloudnativelabs/kube-router/v2/pkg/metrics"
 	"github.com/cloudnativelabs/kube-router/v2/pkg/options"
+	"github.com/cloudnativelabs/kube-router/v2/pkg/svcip"
 	"github.com/cloudnativelabs/kube-router/v2/pkg/utils"
 	"github.com/cloudnativelabs/kube-router/v2/pkg/version"
 	"github.com/coreos/go-iptables/iptables"
@@ -176,8 +177,21 @@ func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error
 	wg.Add(1)
 	go metricsRunCheck(mc, healthCh, stopCh, wg)
 
+	ipValidator, err := svcip.NewValidator(svcip.Config{
+		ExternalIPCIDRs:   krConfig.ExternalIPCIDRs,
+		LoadBalancerCIDRs: krConfig.LoadBalancerCIDRs,
+		ClusterIPCIDRs:    krConfig.ClusterIPCIDRs,
+		StrictValidation:  krConfig.StrictExternalIPValidation,
+		EnableIPv4:        krConfig.EnableIPv4,
+		EnableIPv6:        krConfig.EnableIPv6,
+	})
+	if err != nil {
+		return errors.WithMessage(err, "failed to create service IP validator")
+	}
+	ipValidator.LogStatus()
+
 	npc, err := netpol.NewNetworkPolicyController(client, krConfig, podInformer, npInformer, nsInformer, &sync.Mutex{}, nil,
-		iptablesCmdHandlers, ipSetHandlers)
+		iptablesCmdHandlers, ipSetHandlers, ipValidator)
 	if err != nil {
 		return errors.WithMessage(err, "unable to initialize network policy controller")
 	}
