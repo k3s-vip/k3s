@@ -129,6 +129,7 @@ func Status(app *cli.Context) error {
 	} else {
 		statusOutput += fmt.Sprintf("Server Encryption Hashes: %s\n", status.HashError)
 	}
+
 	var tabBuffer bytes.Buffer
 	if status.ActiveKey != "" || len(status.InactiveKeys) > 0 {
 		w := tabwriter.NewWriter(&tabBuffer, 0, 0, 2, ' ', 0)

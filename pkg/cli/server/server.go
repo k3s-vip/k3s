@@ -41,7 +41,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	kubeapiserverflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
-	"k8s.io/kubernetes/pkg/controlplane/apiserver/options"
+	"k8s.io/kubernetes/pkg/controlplane"
 	utilsnet "k8s.io/utils/net"
 )
 
@@ -78,7 +78,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	}
 
 	klog.EnableContextualLogging(true)
-	ctx := logger.NewContext(signals.SetupSignalContext(), version.Program)
+	ctx := logger.NewContext(signals.SetupSignalContext(), "server")
 	wg := &sync.WaitGroup{}
 
 	// If exiting due to an error, ensure that contexts are cancelled so that the
@@ -328,7 +328,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	}
 
 	// the apiserver service does not yet support dual-stack operation
-	_, apiServerServiceIP, err := options.ServiceIPRange(*serverConfig.ControlConfig.ServiceIPRanges[0])
+	_, apiServerServiceIP, err := controlplane.ServiceIPRange(*serverConfig.ControlConfig.ServiceIPRanges[0])
 	if err != nil {
 		return err
 	}
