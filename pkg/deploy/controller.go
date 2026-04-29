@@ -20,10 +20,9 @@ import (
 	"github.com/k3s-io/k3s/pkg/agent/util"
 	pkgutil "github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
-	"github.com/k3s-io/k3s/pkg/util/logger"
-	"github.com/rancher/wrangler/v3/pkg/apply"
-	"github.com/rancher/wrangler/v3/pkg/kv"
-	"github.com/rancher/wrangler/v3/pkg/objectset"
+	"github.com/rancher/wrangler/pkg/apply"
+	"github.com/rancher/wrangler/pkg/kv"
+	"github.com/rancher/wrangler/pkg/objectset"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -84,7 +83,7 @@ type watcher struct {
 
 // start calls listFiles at regular intervals to trigger application of manifests that have changed on disk.
 func (w *watcher) start(ctx context.Context, client kubernetes.Interface) {
-	w.recorder = pkgutil.BuildControllerEventRecorder(logger.NewContext(ctx, ControllerName), client, ControllerName, metav1.NamespaceSystem)
+	w.recorder = pkgutil.BuildControllerEventRecorder(client, ControllerName, metav1.NamespaceSystem)
 	force := true
 	for {
 		if err := w.listFiles(force); err == nil {
