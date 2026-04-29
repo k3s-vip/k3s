@@ -22,8 +22,6 @@ import (
 	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/util/mux"
 	"github.com/k3s-io/k3s/pkg/util/permissions"
-	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	"k8s.io/klog/v2"
 )
@@ -48,7 +46,7 @@ func Run(clx *cli.Context) (rerr error) {
 	}
 
 	klog.EnableContextualLogging(true)
-	ctx := logger.NewContext(signals.SetupSignalContext(), version.Program)
+	ctx := logger.NewContext(signals.SetupSignalContext(), "agent")
 	wg := &sync.WaitGroup{}
 
 	// If exiting due to an error, ensure that contexts are cancelled so that the
@@ -97,8 +95,6 @@ func Run(clx *cli.Context) (rerr error) {
 		}
 		cmds.AgentConfig.NodeIP.Set(ip)
 	}
-
-	logrus.Info("Starting " + version.Program + " agent " + clx.App.Version)
 
 	dataDir, err := datadir.LocalHome(cmds.AgentConfig.DataDir, cmds.AgentConfig.Rootless)
 	if err != nil {
