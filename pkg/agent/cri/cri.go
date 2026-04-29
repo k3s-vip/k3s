@@ -8,7 +8,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
-	k8sutil "k8s.io/cri-client/pkg/util"
+	k8sutil "k8s.io/kubernetes/pkg/kubelet/util"
 )
 
 const maxMsgSize = 1024 * 1024 * 16

@@ -250,6 +250,11 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 		logrus.Warnf("Unable to take snapshot: not supported for learner")
 		return nil, nil
 	}
+	_, err = e.client.Defragment(ctx, endpoints[0])
+	if err != nil {
+		logrus.Warnf("Unable to defragment etcd: %v", err)
+		return nil, errors.WithMessage(err, "failed to defragment etcd for snapshot")
+	}
 
 	snapshotDir, err := snapshotDir(e.config, true)
 	if err != nil {

@@ -35,7 +35,6 @@ import (
 	"github.com/k3s-io/k3s/pkg/vpn"
 
 	systemd "github.com/coreos/go-systemd/v22/daemon"
-	helmapp "github.com/k3s-io/helm-controller/pkg/app"
 	helmchart "github.com/k3s-io/helm-controller/pkg/controllers/chart"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -44,7 +43,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	kubeapiserverflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
-	"k8s.io/kubernetes/pkg/controlplane/apiserver/options"
+	"k8s.io/kubernetes/pkg/controlplane"
 	utilsnet "k8s.io/utils/net"
 )
 
@@ -79,7 +78,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	}
 
 	klog.EnableContextualLogging(true)
-	ctx := logger.NewContext(signals.SetupSignalContext(), version.Program)
+	ctx := logger.NewContext(signals.SetupSignalContext(), "server")
 	wg := &sync.WaitGroup{}
 
 	// If exiting due to an error, ensure that contexts are cancelled so that the
@@ -341,7 +340,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	}
 
 	// the apiserver service does not yet support dual-stack operation
-	_, apiServerServiceIP, err := options.ServiceIPRange(*serverConfig.ControlConfig.ServiceIPRanges[0])
+	_, apiServerServiceIP, err := controlplane.ServiceIPRange(*serverConfig.ControlConfig.ServiceIPRanges[0])
 	if err != nil {
 		return err
 	}
@@ -438,28 +437,8 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 		return errors.WithMessage(err, "invalid tls-cipher-suites")
 	}
 
-	if !serverConfig.ControlConfig.DisableHelmController {
-		argsMap := map[string]string{}
-		if serverConfig.ControlConfig.HelmJobImage != "" {
-			logrus.Warnf("--helm-job-image is deprecated, please use --helm-controller-arg=default-job-image=%s", serverConfig.ControlConfig.HelmJobImage)
-			argsMap["default-job-image"] = serverConfig.ControlConfig.HelmJobImage
-		}
-
-		helmConfig, err := helmapp.Config(util.GetArgs(argsMap, serverConfig.ControlConfig.ExtraHelmArgs))
-		if err != nil {
-			return errors.WithMessage(err, "failed to parse helm-controller-arg")
-		}
-
-		// Apply SystemDefaultRegistry setting to Helm before starting controllers.
-		// Internally helm-controller defaults to latest tag, but we inject a immutable version at build time.
-		if helmConfig.DefaultJobImage != "" {
-			helmchart.DefaultJobImage = helmConfig.DefaultJobImage
-		} else if serverConfig.ControlConfig.SystemDefaultRegistry != "" {
-			helmchart.DefaultJobImage = serverConfig.ControlConfig.SystemDefaultRegistry + "/" + helmchart.DefaultJobImage
-		}
-
-		helmchart.JobTolerations = helmConfig.JobTolerations
-		helmchart.JobResources = helmConfig.JobResources
+	if !serverConfig.ControlConfig.DisableHelmController && serverConfig.ControlConfig.HelmJobImage != "" {
+		helmchart.DefaultJobImage = serverConfig.ControlConfig.HelmJobImage
 	}
 
 	// If performing a cluster reset, make sure control-plane components are
