@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
@@ -55,7 +54,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -713,7 +711,7 @@ func (e *ETCD) setName(force bool) error {
 		if e.config.ServerNodeName == "" {
 			return errors.New("server node name not set")
 		}
-		e.name = e.config.ServerNodeName + "-" + uuid.New().String()[:8]
+		e.name = e.EndpointName() + strings.ReplaceAll(e.address, ".", "-")
 		if err := os.MkdirAll(filepath.Dir(fileName), 0700); err != nil {
 			return err
 		}
@@ -880,11 +878,13 @@ func toTLSConfig(runtime *config.ControlRuntime) (*tls.Config, error) {
 	}, nil
 }
 
-// getAdvertiseAddress returns the IP address best suited for advertising to clients
+// getAdvertiseAddress returns the IP address best suited for advertising to clients.
+// When no advertise IP is configured, it uses ChooseHostInterfaceWithRetry to
+// wait for a default network route to become available during startup.
 func getAdvertiseAddress(advertiseIP string) (string, error) {
 	ip := advertiseIP
 	if ip == "" {
-		ipAddr, err := utilnet.ChooseHostInterface()
+		ipAddr, err := util.ChooseHostInterfaceWithRetry()
 		if err != nil {
 			return "", err
 		}
