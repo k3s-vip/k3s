@@ -16,6 +16,7 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/labels"
+	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/namespaces"
 	docker "github.com/distribution/reference"
 	reference "github.com/google/go-containerregistry/pkg/name"
@@ -185,11 +186,21 @@ func preloadFile(ctx context.Context, cfg *config.Node, client *containerd.Clien
 			return nil, err
 		}
 		defer imageReader.Close()
+		lease, err := client.LeasesService().Create(ctx, leases.WithID("airgap-import."+filepath.Base(filePath)))
+		if err != nil && !errdefs.IsAlreadyExists(err) {
+			return nil, errors.WithMessagef(err, "failed to create containerd lease %s", lease.ID)
+		}
+		ctx = leases.WithLease(ctx, lease.ID)
 
 		logrus.Infof("Importing images from %s", filePath)
-		images, err = client.Import(ctx, imageReader, containerd.WithAllPlatforms(true), containerd.WithSkipMissing())
+		images, err = client.Import(ctx, imageReader, containerd.WithAllPlatforms(true))
 		if err != nil {
 			return nil, errors.WithMessage(err, "failed to import images from "+filePath)
+		}
+		for _, image := range images {
+			if containerd.NewImage(client, image).Unpack(ctx, cfg.AgentConfig.Snapshotter) != nil {
+				return nil, errors.WithMessagef(err, "failed to unpack image %s", image.Name)
+			}
 		}
 	}
 
@@ -341,6 +352,18 @@ func isHostedBy(name docker.Named, registry string) bool {
 // forceCreateTag retags an image with the provided reference, replacing any image that
 // currently holds that name. If something else takes the name first, the tag is skipped.
 func forceCreateTag(ctx context.Context, imageService images.Store, image images.Image, targetRef string) error {
+	if existing, err := imageService.Get(ctx, targetRef); err == nil && existing.Target.Digest == image.Target.Digest {
+		if existing.Labels == nil {
+			existing.Labels = map[string]string{}
+		}
+		for k, v := range image.Labels {
+			existing.Labels[k] = v
+		}
+		if _, err = imageService.Update(ctx, existing, "labels"); err != nil {
+			return errors.WithMessagef(err, "failed to update image %s", targetRef)
+		}
+		return nil
+	}
 	image.Name = targetRef
 	if _, err := imageService.Create(ctx, image); err != nil {
 		if !errdefs.IsAlreadyExists(err) {

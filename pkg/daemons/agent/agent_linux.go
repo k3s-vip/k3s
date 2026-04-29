@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	cadvisorcontainerd "github.com/google/cadvisor/lib/container/containerd"
 	"github.com/k3s-io/k3s/pkg/cgroups"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/util"
@@ -75,11 +74,8 @@ func kubeletArgsAndConfig(cfg *config.Agent) (map[string]string, *kubeletconfig.
 		return nil, nil, err
 	}
 	argsMap := map[string]string{
-		"config-dir": cfg.KubeletConfigDir,
+		"config":     cfg.KubeletConfig,
 		"kubeconfig": cfg.KubeConfigKubelet,
-		// note: KubeletConfiguration will omit this field when marshalling if it is set to 0, so we set it via CLI
-		// https://github.com/k3s-io/k3s/issues/12164
-		"read-only-port": "0",
 	}
 
 	if cfg.RootDir != "" {
@@ -88,24 +84,23 @@ func kubeletArgsAndConfig(cfg *config.Agent) (map[string]string, *kubeletconfig.
 	}
 	if cfg.RuntimeSocket != "" {
 		defaultConfig.SerializeImagePulls = utilsptr.To(false)
-		// cadvisor needs the containerd endpoint in order to pull stats properly. The kubelet
-		// used to expose this as a --containerd flag, but stopped registering it in v1.37, and
-		// does not pass its own runtime endpoint through.
+		// note: this is a legacy cadvisor flag that the kubelet still exposes, but
+		// it must be set in order for cadvisor to pull stats properly.
 		if strings.Contains(cfg.RuntimeSocket, "containerd") {
-			*cadvisorcontainerd.ArgContainerdEndpoint = strings.TrimPrefix(cfg.RuntimeSocket, socketPrefix)
+			argsMap["containerd"] = cfg.RuntimeSocket
 		}
 		// cadvisor wants the containerd CRI socket without the prefix, but kubelet wants it with the prefix
 		if strings.HasPrefix(cfg.RuntimeSocket, socketPrefix) {
-			defaultConfig.ContainerRuntimeEndpoint = cfg.RuntimeSocket
+			argsMap["container-runtime-endpoint"] = cfg.RuntimeSocket
 		} else {
-			defaultConfig.ContainerRuntimeEndpoint = socketPrefix + cfg.RuntimeSocket
+			argsMap["container-runtime-endpoint"] = socketPrefix + cfg.RuntimeSocket
 		}
 	}
 	if cfg.ImageServiceSocket != "" {
 		if strings.HasPrefix(cfg.ImageServiceSocket, socketPrefix) {
-			defaultConfig.ImageServiceEndpoint = cfg.ImageServiceSocket
+			argsMap["image-service-endpoint"] = cfg.ImageServiceSocket
 		} else {
-			defaultConfig.ImageServiceEndpoint = socketPrefix + cfg.ImageServiceSocket
+			argsMap["image-service-endpoint"] = socketPrefix + cfg.ImageServiceSocket
 		}
 	}
 	if cfg.NodeName != "" {
