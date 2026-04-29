@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
@@ -55,7 +54,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -713,7 +711,7 @@ func (e *ETCD) setName(force bool) error {
 		if e.config.ServerNodeName == "" {
 			return errors.New("server node name not set")
 		}
-		e.name = e.config.ServerNodeName + "-" + uuid.New().String()[:8]
+		e.name = e.EndpointName() + strings.ReplaceAll(e.address, ".", "-")
 		if err := os.MkdirAll(filepath.Dir(fileName), 0700); err != nil {
 			return err
 		}
@@ -880,11 +878,13 @@ func toTLSConfig(runtime *config.ControlRuntime) (*tls.Config, error) {
 	}, nil
 }
 
-// getAdvertiseAddress returns the IP address best suited for advertising to clients
+// getAdvertiseAddress returns the IP address best suited for advertising to clients.
+// When no advertise IP is configured, it uses ChooseHostInterfaceWithRetry to
+// wait for a default network route to become available during startup.
 func getAdvertiseAddress(advertiseIP string) (string, error) {
 	ip := advertiseIP
 	if ip == "" {
-		ipAddr, err := utilnet.ChooseHostInterface()
+		ipAddr, err := util.ChooseHostInterfaceWithRetry()
 		if err != nil {
 			return "", err
 		}
@@ -1526,21 +1526,9 @@ func (e *ETCD) Restore(ctx context.Context) error {
 		return err
 	}
 
-	var restorePath string
-	if strings.HasSuffix(e.config.ClusterResetRestorePath, snapshot.CompressedExtension) {
-		dir, err := snapshotDir(e.config, true)
-		if err != nil {
-			return errors.WithMessage(err, "failed to get the snapshot dir")
-		}
-
-		decompressSnapshot, err := e.decompressSnapshot(dir, e.config.ClusterResetRestorePath)
-		if err != nil {
-			return err
-		}
-
-		restorePath = decompressSnapshot
-	} else {
-		restorePath = e.config.ClusterResetRestorePath
+	restorePath, err := e.restorePath()
+	if err != nil {
+		return err
 	}
 
 	// move the data directory to a temp path
@@ -1557,6 +1545,16 @@ func (e *ETCD) Restore(ctx context.Context) error {
 		PeerURLs:       []string{e.peerURL()},
 		InitialCluster: e.name + "=" + e.peerURL(),
 	})
+}
+
+// restorePath returns the path of the snapshot file to restore from.
+// Compressed snapshots are decompressed alongside the archive and the path to
+// the decompressed path is returned then (or an error if decompression fails).
+func (e *ETCD) restorePath() (string, error) {
+	if !strings.HasSuffix(e.config.ClusterResetRestorePath, snapshot.CompressedExtension) {
+		return e.config.ClusterResetRestorePath, nil
+	}
+	return e.decompressSnapshot(e.config.ClusterResetRestorePath)
 }
 
 // backupDirWithRetention will move the dir to a backup dir
