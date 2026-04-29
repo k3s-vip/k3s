@@ -106,7 +106,7 @@ func WaitForAPIServerReady(ctx context.Context, kubeconfigPath string, timeout t
 
 	err = wait.PollUntilContextTimeout(ctx, time.Second*2, timeout, true, func(ctx context.Context) (bool, error) {
 		// DoRaw returns an error if the response code is < 200 OK or > 206 Partial Content
-		if _, err := restClient.Get().AbsPath("/readyz").Param("verbose", "").DoRaw(ctx); err != nil {
+		if _, err := restClient.Get().AbsPath("/readyz").Param("verbose", "true").Param("exclude", "kms-providers").DoRaw(ctx); err != nil {
 			if err.Error() != lastErr.Error() {
 				logrus.Infof("Polling for API server readiness: GET /readyz failed: %v", err)
 			} else {
@@ -249,9 +249,9 @@ func subjectAccessReview(authClient *authorizationv1client.AuthorizationV1Client
 	}
 }
 
-func BuildControllerEventRecorder(ctx context.Context, k8s clientset.Interface, controllerName, namespace string) record.EventRecorder {
+func BuildControllerEventRecorder(k8s clientset.Interface, controllerName, namespace string) record.EventRecorder {
 	logrus.Infof("Creating %s event broadcaster", controllerName)
-	eventBroadcaster := record.NewBroadcaster(record.WithContext(ctx))
+	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartStructuredLogging(0)
 	eventBroadcaster.StartRecordingToSink(&coregetter.EventSinkImpl{Interface: k8s.CoreV1().Events(namespace)})
 	nodeName := os.Getenv("NODE_NAME")

@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
@@ -55,7 +54,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -175,14 +173,14 @@ func (e *ETCD) EndpointName() string {
 
 // SetControlConfig passes the cluster config into the etcd datastore. This is necessary
 // because the config may not yet be fully built at the time the Driver instance is registered.
-func (e *ETCD) SetControlConfig(config *config.Control) error {
+func (e *ETCD) SetControlConfig(ctx context.Context, config *config.Control) error {
 	if e.config != nil {
 		return errors.New("control config already set")
 	}
 
 	e.config = config
 
-	address, err := getAdvertiseAddress(e.config.PrivateIP)
+	address, err := getAdvertiseAddress(ctx, e.config.PrivateIP)
 	if err != nil {
 		return err
 	}
@@ -713,7 +711,7 @@ func (e *ETCD) setName(force bool) error {
 		if e.config.ServerNodeName == "" {
 			return errors.New("server node name not set")
 		}
-		e.name = e.config.ServerNodeName + "-" + uuid.New().String()[:8]
+		e.name = e.EndpointName() + strings.ReplaceAll(e.address, ".", "-")
 		if err := os.MkdirAll(filepath.Dir(fileName), 0700); err != nil {
 			return err
 		}
@@ -880,11 +878,13 @@ func toTLSConfig(runtime *config.ControlRuntime) (*tls.Config, error) {
 	}, nil
 }
 
-// getAdvertiseAddress returns the IP address best suited for advertising to clients
-func getAdvertiseAddress(advertiseIP string) (string, error) {
+// getAdvertiseAddress returns the IP address best suited for advertising to clients.
+// When no advertise IP is configured, it uses ChooseHostInterfaceWithContext to
+// wait for a default network route to become available during startup.
+func getAdvertiseAddress(ctx context.Context, advertiseIP string) (string, error) {
 	ip := advertiseIP
 	if ip == "" {
-		ipAddr, err := utilnet.ChooseHostInterface()
+		ipAddr, err := util.ChooseHostInterfaceWithContext(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -1180,7 +1180,7 @@ func (e *ETCD) manageLearners(ctx context.Context) {
 		}
 
 		nodes, err := e.getETCDNodes()
-		if err != nil {
+		if err != nil && !errors.Is(err, util.ErrCoreNotReady) {
 			logrus.Warnf("Failed to list nodes with etcd role: %v", err)
 		}
 
@@ -1460,7 +1460,7 @@ func ClientURLs(ctx context.Context, clientAccessInfo *clientaccess.Info, selfIP
 	var memberList Members
 
 	// find the address advertised for our own client URL, so that we don't connect to ourselves
-	ip, err := getAdvertiseAddress(selfIP)
+	ip, err := getAdvertiseAddress(ctx, selfIP)
 	if err != nil {
 		return nil, memberList, err
 	}

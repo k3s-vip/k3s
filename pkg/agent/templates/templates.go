@@ -57,123 +57,135 @@ state = {{ printf "%q" .NodeConfig.Containerd.State }}
 [grpc]
   address = {{ deschemify .NodeConfig.Containerd.Address | printf "%q" }}
 
-[plugins."io.containerd.internal.v1.opt"]
+[plugins.'io.containerd.internal.v1.opt']
   path = {{ printf "%q" .NodeConfig.Containerd.Opt }}
 
-[plugins."io.containerd.grpc.v1.cri"]
+[plugins.'io.containerd.grpc.v1.cri']
   stream_server_address = "127.0.0.1"
   stream_server_port = "10010"
+
   enable_selinux = {{ .NodeConfig.SELinux }}
   enable_unprivileged_ports = {{ .EnableUnprivileged }}
   enable_unprivileged_icmp = {{ .EnableUnprivileged }}
   device_ownership_from_security_context = {{ .NonrootDevices }}
 
-{{- if .DisableCgroup}}
+{{ if .DisableCgroup }}
   disable_cgroup = true
-{{end}}
-{{- if .IsRunningInUserNS }}
+{{ end }}
+
+{{ if .IsRunningInUserNS }}
   disable_apparmor = true
   restrict_oom_score_adj = true
-{{end}}
+{{ end }}
 
-{{- if .NodeConfig.AgentConfig.PauseImage }}
-  sandbox_image = "{{ .NodeConfig.AgentConfig.PauseImage }}"
-{{end}}
+{{ with .NodeConfig.AgentConfig.PauseImage }}
+  sandbox_image = {{ printf "%q" . }}
+{{ end }}
 
-{{- if .NodeConfig.AgentConfig.Snapshotter }}
-[plugins."io.containerd.grpc.v1.cri".containerd]
-  snapshotter = "{{ .NodeConfig.AgentConfig.Snapshotter }}"
-  disable_snapshot_annotations = {{ if or (eq .NodeConfig.AgentConfig.Snapshotter "stargz") (eq .NodeConfig.AgentConfig.Snapshotter "nix") }}false{{else}}true{{end}}
-  {{ if .NodeConfig.DefaultRuntime }}default_runtime_name = "{{ .NodeConfig.DefaultRuntime }}"{{end}}
-{{ if eq .NodeConfig.AgentConfig.Snapshotter "stargz" }}
-{{ if .NodeConfig.AgentConfig.ImageServiceSocket }}
-[plugins."io.containerd.snapshotter.v1.stargz"]
-cri_keychain_image_service_path = "{{ .NodeConfig.AgentConfig.ImageServiceSocket }}"
-[plugins."io.containerd.snapshotter.v1.stargz".cri_keychain]
-enable_keychain = true
-{{end}}
+{{ with .NodeConfig.AgentConfig.Snapshotter }}
+[plugins.'io.containerd.grpc.v1.cri'.containerd]
+  snapshotter = {{ printf "%q" . }}
+  disable_snapshot_annotations = {{ if or (eq . "stargz") (eq . "nix") }}false{{ else }}true{{ end }}
+  {{ with $.NodeConfig.DefaultRuntime }}default_runtime_name = {{ printf "%q" . }}{{ end }}
+{{ end }}
 
-[plugins."io.containerd.snapshotter.v1.stargz".registry]
+{{- if or .NodeConfig.AgentConfig.CNIBinDir .NodeConfig.AgentConfig.CNIConfDir }}
+[plugins.'io.containerd.grpc.v1.cri'.cni]
+  {{ with .NodeConfig.AgentConfig.CNIBinDir }}bin_dir = {{ printf "%q" . }}{{ end }}
+  {{ with .NodeConfig.AgentConfig.CNIConfDir }}conf_dir = {{ printf "%q" . }}{{ end }}
+{{ end }}
+
+{{ if or .NodeConfig.Containerd.BlockIOConfig .NodeConfig.Containerd.RDTConfig }}
+[plugins.'io.containerd.service.v1.tasks-service']
+  {{ with .NodeConfig.Containerd.BlockIOConfig }}blockio_config_file = {{ printf "%q" . }}{{ end }}
+  {{ with .NodeConfig.Containerd.RDTConfig }}rdt_config_file = {{ printf "%q" . }}{{ end }}
+{{ end }}
+
+
+[plugins.'io.containerd.grpc.v1.cri'.containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins.'io.containerd.grpc.v1.cri'.containerd.runtimes.runc.options]
+  SystemdCgroup = {{ .SystemdCgroup }}
+
+[plugins.'io.containerd.grpc.v1.cri'.containerd.runtimes.runhcs-wcow-process]
+  runtime_type = "io.containerd.runhcs.v1"
+
+{{ range $k, $v := .ExtraRuntimes }}
+[plugins.'io.containerd.grpc.v1.cri'.containerd.runtimes.'{{ $k }}']
+  runtime_type = "{{ $v.RuntimeType }}"
+{{ with $v.BinaryName }}
+[plugins.'io.containerd.grpc.v1.cri'.containerd.runtimes.'{{ $k }}'.options]
+  BinaryName = {{ printf "%q" . }}
+  SystemdCgroup = {{ $.SystemdCgroup }}
+{{ end }}
+{{ end }}
+
+[plugins.'io.containerd.grpc.v1.cri'.registry]
   config_path = {{ printf "%q" .NodeConfig.Containerd.Registry }}
 
 {{ if .PrivateRegistryConfig }}
-{{range $k, $v := .PrivateRegistryConfig.Configs }}
-{{ if $v.Auth }}
-[plugins."io.containerd.snapshotter.v1.stargz".registry.configs."{{$k}}".auth]
-  {{ if $v.Auth.Username }}username = {{ printf "%q" $v.Auth.Username }}{{end}}
-  {{ if $v.Auth.Password }}password = {{ printf "%q" $v.Auth.Password }}{{end}}
-  {{ if $v.Auth.Auth }}auth = {{ printf "%q" $v.Auth.Auth }}{{end}}
-  {{ if $v.Auth.IdentityToken }}identitytoken = {{ printf "%q" $v.Auth.IdentityToken }}{{end}}
-{{end}}
-{{end}}
-{{end}}
-{{end}}
-{{end}}
+{{ range $k, $v := .PrivateRegistryConfig.Configs }}
+{{ with $v.Auth }}
+[plugins.'io.containerd.grpc.v1.cri'.registry.configs.'{{ $k }}'.auth]
+  {{ with .Username }}username = {{ printf "%q" . }}{{ end }}
+  {{ with .Password }}password = {{ printf "%q" . }}{{ end }}
+  {{ with .Auth }}auth = {{ printf "%q" . }}{{ end }}
+  {{ with .IdentityToken }}identitytoken = {{ printf "%q" . }}{{ end }}
+{{ end }}
+{{ end }}
+{{ end }}
+
+{{ if eq .NodeConfig.AgentConfig.Snapshotter "stargz" }}
+{{ with .NodeConfig.AgentConfig.ImageServiceSocket }}
+[plugins.'io.containerd.snapshotter.v1.stargz']
+  cri_keychain_image_service_path = {{ printf "%q" . }}
+
+[plugins.'io.containerd.snapshotter.v1.stargz'.cri_keychain]
+  enable_keychain = true
+{{ end }}
+
+[plugins.'io.containerd.snapshotter.v1.stargz'.registry]
+  config_path = {{ printf "%q" .NodeConfig.Containerd.Registry }}
+
+{{ if .PrivateRegistryConfig }}
+{{ range $k, $v := .PrivateRegistryConfig.Configs }}
+{{ with $v.Auth }}
+[plugins.'io.containerd.snapshotter.v1.stargz'.registry.configs.'{{ $k }}'.auth]
+  {{ with .Username }}username = {{ printf "%q" . }}{{ end }}
+  {{ with .Password }}password = {{ printf "%q" . }}{{ end }}
+  {{ with .Auth }}auth = {{ printf "%q" . }}{{ end }}
+  {{ with .IdentityToken }}identitytoken = {{ printf "%q" . }}{{ end }}
+{{ end }}
+{{ end }}
+{{ end }}
+{{ end }}
 
 {{ if eq .NodeConfig.AgentConfig.Snapshotter "nix" }}
-{{ if .NodeConfig.AgentConfig.ImageServiceSocket }}
-[plugins."io.containerd.snapshotter.v1.nix"]
-  address = "{{ .NodeConfig.AgentConfig.ImageServiceSocket }}"
+{{ with .NodeConfig.AgentConfig.ImageServiceSocket }}
+[plugins.'io.containerd.snapshotter.v1.nix']
+  address = {{ printf "%q" . }}
 
-[plugins."io.containerd.snapshotter.v1.nix".image_service]
+[plugins.'io.containerd.snapshotter.v1.nix'.image_service]
   enable = true
-  containerd_address = {{ deschemify .NodeConfig.Containerd.Address | printf "%q" }}
+  containerd_address = {{ deschemify $.NodeConfig.Containerd.Address | printf "%q" }}
 
-[[plugins."io.containerd.transfer.v1.local".unpack_config]]
+[[plugins.'io.containerd.transfer.v1.local'.unpack_config]]
   platform = "linux/amd64"
   snapshotter = "nix"
   differ = "walking"
 
-[[plugins."io.containerd.transfer.v1.local".unpack_config]]
+[[plugins.'io.containerd.transfer.v1.local'.unpack_config]]
   platform = "linux/arm64"
   snapshotter = "nix"
   differ = "walking"
-{{end}}
-{{end}}
+{{ end }}
+{{ end }}
 
-{{- if or .NodeConfig.AgentConfig.CNIBinDir .NodeConfig.AgentConfig.CNIConfDir }}
-[plugins."io.containerd.grpc.v1.cri".cni]
-  {{ if .NodeConfig.AgentConfig.CNIBinDir }}bin_dir = {{ printf "%q" .NodeConfig.AgentConfig.CNIBinDir }}{{end}}
-  {{ if .NodeConfig.AgentConfig.CNIConfDir }}conf_dir = {{ printf "%q" .NodeConfig.AgentConfig.CNIConfDir }}{{end}}
-{{end}}
-
-{{- if or .NodeConfig.Containerd.BlockIOConfig .NodeConfig.Containerd.RDTConfig }}
-[plugins."io.containerd.service.v1.tasks-service"]
-  {{ if .NodeConfig.Containerd.BlockIOConfig }}blockio_config_file = {{ printf "%q" .NodeConfig.Containerd.BlockIOConfig }}{{end}}
-  {{ if .NodeConfig.Containerd.RDTConfig }}rdt_config_file = {{ printf "%q" .NodeConfig.Containerd.RDTConfig }}{{end}}
-{{end}}
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
-  runtime_type = "io.containerd.runc.v2"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
-  SystemdCgroup = {{ .SystemdCgroup }}
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runhcs-wcow-process]
-  runtime_type = "io.containerd.runhcs.v1"
-
-[plugins."io.containerd.grpc.v1.cri".registry]
-  config_path = {{ printf "%q" .NodeConfig.Containerd.Registry }}
-
-{{ if .PrivateRegistryConfig }}
-{{range $k, $v := .PrivateRegistryConfig.Configs }}
-{{ if $v.Auth }}
-[plugins."io.containerd.grpc.v1.cri".registry.configs."{{$k}}".auth]
-  {{ if $v.Auth.Username }}username = {{ printf "%q" $v.Auth.Username }}{{end}}
-  {{ if $v.Auth.Password }}password = {{ printf "%q" $v.Auth.Password }}{{end}}
-  {{ if $v.Auth.Auth }}auth = {{ printf "%q" $v.Auth.Auth }}{{end}}
-  {{ if $v.Auth.IdentityToken }}identitytoken = {{ printf "%q" $v.Auth.IdentityToken }}{{end}}
-{{end}}
-{{end}}
-{{end}}
-
-{{range $k, $v := .ExtraRuntimes}}
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes."{{$k}}"]
-  runtime_type = "{{$v.RuntimeType}}"
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes."{{$k}}".options]
-  BinaryName = "{{$v.BinaryName}}"
-  SystemdCgroup = {{ $.SystemdCgroup }}
-{{end}}
+{{ if .IsRunningInUserNS }}
+[plugins.'io.containerd.nri.v1.nri']
+  disable = true
+{{ end }}
 `
 
 // This version 3 config template is used by both Linux and Windows nodes

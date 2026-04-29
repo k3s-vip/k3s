@@ -23,17 +23,14 @@ type HostConfigs map[string]templates.HostConfig
 
 // writeContainerdConfig renders and saves config.toml from the filled template
 func writeContainerdConfig(cfg *config.Node, containerdConfig templates.ContainerdConfig) error {
-	var containerdTemplate string
+	containerdTemplate := templates.ContainerdConfigTemplate
 	containerdTemplateBytes, err := os.ReadFile(cfg.Containerd.Template)
 	if err == nil {
 		logrus.Infof("Using containerd template at %s", cfg.Containerd.Template)
 		containerdTemplate = string(containerdTemplateBytes)
-	} else if os.IsNotExist(err) {
-		containerdTemplate = templates.ContainerdConfigTemplate
-	} else {
+	} else if !os.IsNotExist(err) {
 		return err
 	}
-
 	parsedTemplate, err := templates.ParseTemplateFromConfig(containerdTemplate, containerdConfig)
 	if err != nil {
 		return err
