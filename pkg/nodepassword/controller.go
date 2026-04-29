@@ -35,8 +35,7 @@ var controller *nodePasswordController
 func Register(ctx context.Context, coreClient kubernetes.Interface, secrets coreclient.SecretController, nodes coreclient.NodeController) error {
 	// start a cache that only watches only node-password secrets in the kube-system namespace
 	lw := toolscache.NewListWatchFromClient(coreClient.CoreV1().RESTClient(), "secrets", metav1.NamespaceSystem, fields.OneTermEqualSelector("type", string(SecretTypeNodePassword)))
-	informerOpts := toolscache.InformerOptions{ListerWatcher: lw, ObjectType: &corev1.Secret{}, Handler: &toolscache.ResourceEventHandlerFuncs{}}
-	indexer, informer := toolscache.NewInformerWithOptions(informerOpts)
+	indexer, informer := toolscache.NewIndexerInformer(lw, &corev1.Secret{}, 0, &toolscache.ResourceEventHandlerFuncs{}, toolscache.Indexers{})
 	npc := &nodePasswordController{
 		nodes:        nodes,
 		secrets:      secrets,

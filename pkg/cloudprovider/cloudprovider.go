@@ -83,13 +83,14 @@ func init() {
 }
 
 func (k *k3s) Initialize(clientBuilder cloudprovider.ControllerClientBuilder, stop <-chan struct{}) {
-	ctx := logger.NewContext(wait.ContextForChannel(stop), controllerName)
+	ctx, _ := wait.ContextForChannel(stop)
+	ctx = logger.NewContext(ctx, controllerName)
 	config := clientBuilder.ConfigOrDie(controllerName)
 	k.client = kubernetes.NewForConfigOrDie(config)
 
 	if k.LBEnabled {
 		// Wrangler controller and caches are only needed if the load balancer controller is enabled.
-		k.recorder = util.BuildControllerEventRecorder(ctx, k.client, controllerName, meta.NamespaceAll)
+		k.recorder = util.BuildControllerEventRecorder(k.client, controllerName, meta.NamespaceAll)
 		coreFactory := core.NewFactoryFromConfigOrDie(config)
 		k.nodeCache = coreFactory.Core().V1().Node().Cache()
 
