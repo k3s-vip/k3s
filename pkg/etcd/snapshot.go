@@ -124,7 +124,7 @@ func (e *ETCD) compressSnapshot(snapshotDir, snapshotFilename string, mtime time
 		return "", err
 	}
 
-	of, err := os.Create(zipPath)
+	of, err := os.OpenFile(zipPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return "", err
 	}
@@ -249,6 +249,7 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 		logrus.Warnf("Unable to take snapshot: not supported for learner")
 		return nil, nil
 	}
+	e.defragment(ctx)
 
 	snapshotDir, err := snapshotDir(e.config, true)
 	if err != nil {
