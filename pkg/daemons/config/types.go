@@ -121,6 +121,7 @@ type Agent struct {
 	ClusterDomain           string
 	ResolvConf              string
 	RootDir                 string
+	KubeletConfig           string
 	KubeletConfigDir        string
 	KubeConfigKubelet       string
 	KubeConfigKubeProxy     string
@@ -225,7 +226,8 @@ type Control struct {
 	ExtraControllerArgs      []string
 	ExtraCloudControllerArgs []string
 	ExtraEtcdArgs            []string
-	ExtraSchedulerAPIArgs    []string
+	ExtraSchedulerArgs       []string
+	ExtraHelmArgs            []string
 	NoLeaderElect            bool
 	JoinURL                  string
 	IPSECPSK                 string
