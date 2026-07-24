@@ -1,10 +1,21 @@
+TARGETS := $(shell ls scripts | grep -v \\.sh)
 GO_FILES ?= $$(find . -name '*.go')
 SHELL := /bin/bash
 
 
+.dapper:
+	@echo Downloading dapper
+	@curl -sL https://releases.rancher.com/dapper/v0.6.0/dapper-$$(uname -s)-$$(uname -m) > .dapper.tmp
+	@@chmod +x .dapper.tmp
+	@./.dapper.tmp -v
+	@mv .dapper.tmp .dapper
+
 .PHONY: docker.sock
 docker.sock:
 	while ! docker version 1>/dev/null; do sleep 1; done
+
+$(TARGETS): .dapper docker.sock
+	./.dapper $@
 
 .PHONY: deps
 deps:
@@ -79,5 +90,5 @@ airgap:
 	@echo "INFO: Building K3s airgap tarball..."
 	./scripts/package-airgap
 
-.PHONY: ci
-ci:  binary image airgap
+.PHONY: local-ci
+local-ci:  binary image airgap

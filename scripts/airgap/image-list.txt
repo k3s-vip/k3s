@@ -1,8 +1,8 @@
-docker.io/rancher/klipper-helm:v0.13.2-build20260716
+alpine:3.24
+docker.io/coredns/coredns:1.14.6
+docker.io/rancher/klipper-helm:latest
 docker.io/rancher/klipper-lb:v0.4.17
 docker.io/rancher/local-path-provisioner:v0.0.36
-docker.io/rancher/mirrored-coredns-coredns:1.14.6
-docker.io/rancher/mirrored-library-busybox:1.37.0
-docker.io/rancher/mirrored-library-traefik:3.7.8
-docker.io/rancher/mirrored-metrics-server:v0.9.0
-docker.io/rancher/mirrored-pause:3.10.2
+registry.k8s.io/metrics-server/metrics-server:v0.9.0
+registry.k8s.io/pause:3.10.2
+traefik:v3.7
