@@ -5,7 +5,9 @@ metadata:
   name: traefik-crd
   namespace: kube-system
 spec:
-  chart: https://%{KUBERNETES_API}%/static/charts/traefik-crd-39.0.501+up39.0.5.tgz
+  forceConflicts: true
+  failurePolicy: retry
+  chart: https://%{KUBERNETES_API}%/static/charts/traefik-crd-40.1.4+up40.1.0.tgz
 ---
 apiVersion: helm.cattle.io/v1
 kind: HelmChart
@@ -13,14 +15,15 @@ metadata:
   name: traefik
   namespace: kube-system
 spec:
-  chart: https://%{KUBERNETES_API}%/static/charts/traefik-39.0.501+up39.0.5.tgz
+  forceConflicts: true
+  failurePolicy: retry
+  chart: https://%{KUBERNETES_API}%/static/charts/traefik-40.1.4+up40.1.0.tgz
   set:
     global.systemDefaultRegistry: "%{SYSTEM_DEFAULT_REGISTRY_RAW}%"
   valuesContent: |-
-    deployment:
-      podAnnotations:
-        prometheus.io/port: "8082"
-        prometheus.io/scrape: "true"
+    globalArguments:
+    - --global.checknewversion=false
+    - --global.sendanonymoususage=false
     providers:
       kubernetesIngress:
         publishedService:
@@ -35,8 +38,7 @@ spec:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
-    - key: "node-role.kubernetes.io/master"
-      operator: "Exists"
-      effect: "NoSchedule"
     service:
-      ipFamilyPolicy: "PreferDualStack"
+      spec:
+        ipFamilyPolicy: "PreferDualStack"
+        type: "ClusterIP"
