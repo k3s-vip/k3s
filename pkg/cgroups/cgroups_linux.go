@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 package cgroups
 
@@ -83,11 +82,11 @@ func CheckCgroups() (kubeletRoot, runtimeRoot string, controllers map[string]boo
 	if cgroupsModeV2 {
 		m, err := cgroupsv2.NewManager("/sys/fs/cgroup", "/", &cgroupsv2.Resources{})
 		if err != nil {
-			return
+			return kubeletRoot, runtimeRoot, controllers
 		}
 		enabledControllers, err := m.Controllers()
 		if err != nil {
-			return
+			return kubeletRoot, runtimeRoot, controllers
 		}
 		// Intentionally using an expressionless switch to match the logic below
 		for _, controller := range enabledControllers {
@@ -97,7 +96,7 @@ func CheckCgroups() (kubeletRoot, runtimeRoot string, controllers map[string]boo
 
 	f, err := os.Open("/proc/self/cgroup")
 	if err != nil {
-		return
+		return kubeletRoot, runtimeRoot, controllers
 	}
 	defer f.Close()
 
@@ -151,7 +150,7 @@ func CheckCgroups() (kubeletRoot, runtimeRoot string, controllers map[string]boo
 		// a host PID scenario but we don't support this.
 		g, err := os.Open("/proc/1/cgroup")
 		if err != nil {
-			return
+			return kubeletRoot, runtimeRoot, controllers
 		}
 		defer g.Close()
 		scan = bufio.NewScanner(g)
@@ -164,8 +163,7 @@ func CheckCgroups() (kubeletRoot, runtimeRoot string, controllers map[string]boo
 			// For v1 or hybrid, controller can be a single value {"blkio"}, or a comounted set {"cpu","cpuacct"}
 			// For v2, controllers = {""} (only contains a single empty string)
 			for _, controller := range controllers {
-				switch {
-				case controller == "name=systemd" || cgroupsModeV2:
+				if controller == "name=systemd" || cgroupsModeV2 {
 					last := parts[len(parts)-1]
 					if last != "/" && last != "/init.scope" {
 						kubeletRoot = "/" + version.Program
@@ -175,5 +173,5 @@ func CheckCgroups() (kubeletRoot, runtimeRoot string, controllers map[string]boo
 			}
 		}
 	}
-	return
+	return kubeletRoot, runtimeRoot, controllers
 }

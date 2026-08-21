@@ -12,9 +12,8 @@ import (
 	"strings"
 
 	"github.com/k3s-io/k3s/pkg/agent/util"
-	"github.com/rancher/wrangler/pkg/data/convert"
 	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v2"
 )
 
@@ -75,8 +74,8 @@ func (p *Parser) stripInvalidFlags(command string, args []string) ([]string, err
 	}
 	validFlags := make(map[string]bool, len(cmdFlags))
 	for _, f := range cmdFlags {
-		//split flags with aliases into 2 entries
-		for _, s := range strings.Split(f.GetName(), ",") {
+		// split flags with aliases into 2 entries
+		for _, s := range f.Names() {
 			validFlags[s] = true
 		}
 	}
@@ -93,7 +92,7 @@ func (p *Parser) stripInvalidFlags(command string, args []string) ([]string, err
 		if validFlags[mArg] {
 			result = append(result, arg)
 		} else {
-			logrus.Warnf("Unknown flag %s found in config.yaml, skipping\n", strings.Split(arg, "=")[0])
+			logrus.Debug("Unknown flag %s found in config.yaml, skipping\n", strings.Split(arg, "=")[0])
 		}
 	}
 	return result, nil
@@ -135,7 +134,7 @@ func (p *Parser) FindString(args []string, target string) (string, error) {
 			return "", err
 		}
 		for _, i := range data {
-			k, v := convert.ToString(i.Key), convert.ToString(i.Value)
+			k, v := ToString(i.Key), ToString(i.Value)
 			isAppend := strings.HasSuffix(k, "+")
 			k = strings.TrimSuffix(k, "+")
 			if k == target {
@@ -237,7 +236,7 @@ func dotDFiles(basefile string) (result []string, _ error) {
 		}
 		result = append(result, filepath.Join(basefile+".d", file.Name()))
 	}
-	return
+	return result, nil
 }
 
 // readConfigFile returns a flattened arg list generated from the specified config
@@ -277,7 +276,7 @@ func readConfigFile(file string) (result []string, _ error) {
 		}
 
 		for _, i := range data {
-			k, v := convert.ToString(i.Key), i.Value
+			k, v := ToString(i.Key), i.Value
 			isAppend := strings.HasSuffix(k, "+")
 			k = strings.TrimSuffix(k, "+")
 
@@ -304,15 +303,15 @@ func readConfigFile(file string) (result []string, _ error) {
 
 		if slice, ok := v.([]any); ok {
 			for _, v := range slice {
-				result = append(result, prefix+k+"="+convert.ToString(v))
+				result = append(result, prefix+k+"="+ToString(v))
 			}
 		} else {
-			str := convert.ToString(v)
+			str := ToString(v)
 			result = append(result, prefix+k+"="+str)
 		}
 	}
 
-	return
+	return result, nil
 }
 
 func toSlice(v any) []any {
@@ -322,7 +321,7 @@ func toSlice(v any) []any {
 	case []any:
 		return k
 	default:
-		str := strings.TrimSpace(convert.ToString(v))
+		str := strings.TrimSpace(ToString(v))
 		if str == "" {
 			return nil
 		}

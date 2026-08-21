@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,14 +19,16 @@ import (
 	"github.com/k3s-io/k3s/pkg/bootstrap"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
-	"github.com/k3s-io/k3s/pkg/etcd"
+	"github.com/k3s-io/k3s/pkg/daemons/executor"
+	"github.com/k3s-io/k3s/pkg/etcd/store"
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/k3s-io/kine/pkg/client"
 	"github.com/k3s-io/kine/pkg/endpoint"
+	"github.com/k3s-io/kine/pkg/tls"
 	"github.com/otiai10/copy"
-	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 )
 
 // Bootstrap attempts to load a managed database driver, if one has been initialized or should be created/joined.
@@ -35,7 +36,7 @@ import (
 // ControlRuntimeBootstrap struct, either via HTTP or from the datastore.
 func (c *Cluster) Bootstrap(ctx context.Context, clusterReset bool) error {
 	if err := c.assignManagedDriver(ctx); err != nil {
-		return pkgerrors.WithMessage(err, "failed to set datastore driver")
+		return errors.WithMessage(err, "failed to set datastore driver")
 	}
 
 	// Check if we need to bootstrap, and whether or not the managed database has already
@@ -44,7 +45,7 @@ func (c *Cluster) Bootstrap(ctx context.Context, clusterReset bool) error {
 	// This also sets c.clientAccessInfo if c.config.JoinURL and c.config.Token are set.
 	shouldBootstrap, isInitialized, err := c.shouldBootstrapLoad(ctx)
 	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to check if bootstrap data has been initialized")
+		return errors.WithMessage(err, "failed to check if bootstrap data has been initialized")
 	}
 
 	if c.managedDB != nil {
@@ -52,7 +53,7 @@ func (c *Cluster) Bootstrap(ctx context.Context, clusterReset bool) error {
 			// secondary server with etcd disabled, start the etcd proxy so that we can attempt to use it
 			// when reconciling.
 			if err := c.startEtcdProxy(ctx); err != nil {
-				return pkgerrors.WithMessage(err, "failed to start etcd proxy")
+				return errors.WithMessage(err, "failed to start etcd proxy")
 			}
 		} else if isInitialized && !clusterReset {
 			// For secondary servers with etcd, first attempt to connect and reconcile using the join URL.
@@ -65,11 +66,13 @@ func (c *Cluster) Bootstrap(ctx context.Context, clusterReset bool) error {
 					return nil
 				}
 			}
-			// Not a secondary server or failed to reconcile via join URL, start up a temporary etcd
-			// with the local datastore and use that to reconcile.
-			if err := c.reconcileEtcd(ctx); err != nil {
-				logrus.Fatalf("Failed to reconcile with temporary etcd: %v", err)
+			// Not a secondary server or failed to reconcile via join URL,
+			// extract bootstrap data from a copy of the etcd mvcc store and reconcile
+			// against that.
+			if err := c.ReconcileBootstrapData(ctx, nil, &c.config.Runtime.ControlRuntimeBootstrap, false); err != nil {
+				return errors.WithMessage(err, "failed to reconcile with local datastore")
 			}
+			logrus.Info("Successfully reconciled with local datastore")
 		}
 	}
 
@@ -113,26 +116,26 @@ func (c *Cluster) shouldBootstrapLoad(ctx context.Context) (bool, bool, error) {
 			// Not initialized, not joining - must be initializing (cluster-init)
 			logrus.Infof("Managed %s cluster initializing", c.managedDB.EndpointName())
 			return false, false, nil
+		}
+
+		// Not initialized, but have a Join URL - fail if there's no token; if there is then validate it.
+		// Note that this is the path taken by control-plane-only nodes every startup, as they have a non-nil managedDB that is never initialized.
+		if c.config.Token == "" {
+			return false, false, errors.New("token is required to join a cluster")
+		}
+
+		// Fail if the token isn't syntactically valid, or if the CA hash on the remote server doesn't match
+		// the hash in the token. The password isn't actually checked until later when actually bootstrapping.
+		info, err := clientaccess.ParseAndValidateToken(c.config.JoinURL, c.config.Token, opts...)
+		if err != nil {
+			return false, false, errors.WithMessage(err, "failed to validate token")
+		}
+		c.clientAccessInfo = info
+
+		if c.config.DisableETCD {
+			logrus.Infof("Managed %s disabled on this node", c.managedDB.EndpointName())
 		} else {
-			// Not initialized, but have a Join URL - fail if there's no token; if there is then validate it.
-			// Note that this is the path taken by control-plane-only nodes every startup, as they have a non-nil managedDB that is never initialized.
-			if c.config.Token == "" {
-				return false, false, errors.New("token is required to join a cluster")
-			}
-
-			// Fail if the token isn't syntactically valid, or if the CA hash on the remote server doesn't match
-			// the hash in the token. The password isn't actually checked until later when actually bootstrapping.
-			info, err := clientaccess.ParseAndValidateToken(c.config.JoinURL, c.config.Token, opts...)
-			if err != nil {
-				return false, false, pkgerrors.WithMessage(err, "failed to validate token")
-			}
-			c.clientAccessInfo = info
-
-			if c.config.DisableETCD {
-				logrus.Infof("Managed %s disabled on this node", c.managedDB.EndpointName())
-			} else {
-				logrus.Infof("Managed %s cluster not yet initialized", c.managedDB.EndpointName())
-			}
+			logrus.Infof("Managed %s cluster not yet initialized", c.managedDB.EndpointName())
 		}
 	}
 
@@ -157,9 +160,10 @@ func isDirEmpty(name string) (bool, error) {
 	return false, err
 }
 
-// certDirsExist checks to see if the directories
-// that contain the needed certificates exist.
-func (c *Cluster) certDirsExist() error {
+// checkCertDirs checks to see if the directories
+// that contain the server certificates exist.
+// An error is returned if any dirs are missing or empty.
+func (c *Cluster) checkCertDirs() error {
 	bootstrapDirs := []string{
 		"cred",
 		"tls",
@@ -244,7 +248,7 @@ func isMigrated(buf io.ReadSeeker, files *bootstrap.PathsDataformat) bool {
 func (c *Cluster) ReconcileBootstrapData(ctx context.Context, buf io.ReadSeeker, crb *config.ControlRuntimeBootstrap, isHTTP bool) error {
 	logrus.Info("Reconciling bootstrap data between datastore and disk")
 
-	if err := c.certDirsExist(); err != nil {
+	if err := c.checkCertDirs(); err != nil && buf != nil {
 		// we need to see if the data has been migrated before writing to disk. This
 		// is because the data may have been given to us via the HTTP bootstrap process
 		// from an older version of k3s. That version might not have the new data format
@@ -261,7 +265,6 @@ func (c *Cluster) ReconcileBootstrapData(ctx context.Context, buf io.ReadSeeker,
 		return bootstrap.WriteToDiskFromStorage(files, crb)
 	}
 
-	var dbRawData []byte
 	if c.managedDB != nil && !isHTTP {
 		token := c.config.Token
 		if token == "" {
@@ -282,28 +285,57 @@ func (c *Cluster) ReconcileBootstrapData(ctx context.Context, buf io.ReadSeeker,
 			return err
 		}
 
-		var value *client.Value
+		var kv *mvccpb.KeyValue
+		var storageClient store.ReadCloser
 
-		storageClient, err := client.New(c.config.Runtime.EtcdConfig)
-		if err != nil {
-			return err
+		if executor.IsSelfHosted() {
+			// etcd will never be running at this point when using embedded executor,
+			// but other executors may opt to leave it running when the supervisor
+			// process is down. In this case, try to connect to local etcd first; if
+			// that fails fall back to reading direct from etcd store on disk.
+			etcdConfig := endpoint.ETCDConfig{
+				Endpoints: []string{fmt.Sprintf("https://%s:2379", c.config.Loopback(true))},
+				TLSConfig: tls.Config{
+					TrustedCAFile: c.config.Runtime.ETCDServerCA,
+					CAFile:        c.config.Runtime.ETCDServerCA,
+					CertFile:      c.config.Runtime.ClientETCDCert,
+					KeyFile:       c.config.Runtime.ClientETCDKey,
+				},
+			}
+			storageClient, err = store.NewRemoteStore(etcdConfig)
+			if err != nil {
+				logrus.Infof("Unable to connect to etcd: %v; trying direct datastore access", err)
+				storageClient = nil
+			}
 		}
+
+		if storageClient == nil {
+			storageClient, err = store.NewTemporaryStore(filepath.Join(c.config.DataDir, "db", "etcd"))
+			if err != nil {
+				return errors.WithMessage(err, "failed to create temporary datastore client")
+			}
+		}
+
 		defer storageClient.Close()
 
-		value, c.saveBootstrap, err = getBootstrapKeyFromStorage(ctx, storageClient, normalizedToken, token)
+		kv, c.saveBootstrap, err = getBootstrapKeyFromStorage(ctx, storageClient, normalizedToken, token)
 		if err != nil {
 			return err
 		}
-		if value == nil {
-			return nil
+		if kv == nil || len(kv.Value) == 0 {
+			return errors.New("no bootstrap data found in datastore - check server token value and verify datastore integrity")
 		}
 
-		dbRawData, err = decrypt(normalizedToken, value.Data)
+		dbRawData, err := decrypt(normalizedToken, kv.Value)
 		if err != nil {
 			return err
 		}
 
 		buf = bytes.NewReader(dbRawData)
+	}
+
+	if buf == nil {
+		return errors.New("no bootstrap data is available to reconcile against")
 	}
 
 	paths, err := bootstrap.ObjToMap(crb)
@@ -334,7 +366,7 @@ func (c *Cluster) ReconcileBootstrapData(ctx context.Context, buf io.ReadSeeker,
 
 		updated, newer, err := isNewerFile(path, fileData)
 		if err != nil {
-			return pkgerrors.WithMessagef(err, "failed to get update status of %s", pathKey)
+			return errors.WithMessagef(err, "failed to get update status of %s", pathKey)
 		}
 		if newer {
 			newerOnDisk = append(newerOnDisk, path)
@@ -348,13 +380,13 @@ func (c *Cluster) ReconcileBootstrapData(ctx context.Context, buf io.ReadSeeker,
 		serverTLSDir := filepath.Join(c.config.DataDir, "tls")
 		tlsBackupDir := filepath.Join(c.config.DataDir, "tls-"+strconv.Itoa(int(time.Now().Unix())))
 
-		logrus.Infof("Cluster reset: backing up certificates directory to " + tlsBackupDir)
+		logrus.Infof("Cluster reset: backing up certificates directory to %s", tlsBackupDir)
 
 		if _, err := os.Stat(serverTLSDir); err != nil {
-			return pkgerrors.WithMessage(err, "cluster reset failed to stat server TLS dir")
+			return errors.WithMessage(err, "cluster reset failed to stat server TLS dir")
 		}
 		if err := copy.Copy(serverTLSDir, tlsBackupDir); err != nil {
-			return pkgerrors.WithMessage(err, "cluster reset failed to back up server TLS dir")
+			return errors.WithMessage(err, "cluster reset failed to back up server TLS dir")
 		}
 	} else if len(newerOnDisk) > 0 {
 		logrus.Fatal(strings.Join(newerOnDisk, ", ") + " newer than datastore and could cause a cluster outage. Remove the file(s) from disk and restart to be recreated from datastore.")
@@ -377,13 +409,13 @@ func isNewerFile(path string, file bootstrap.File) (updated bool, newerOnDisk bo
 			logrus.Warn(path + " doesn't exist. continuing...")
 			return true, false, nil
 		}
-		return false, false, pkgerrors.WithMessagef(err, "reconcile failed to open")
+		return false, false, errors.WithMessagef(err, "reconcile failed to open")
 	}
 	defer f.Close()
 
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return false, false, pkgerrors.WithMessagef(err, "reconcile failed to read")
+		return false, false, errors.WithMessagef(err, "reconcile failed to read")
 	}
 
 	if bytes.Equal(file.Content, data) {
@@ -392,7 +424,7 @@ func isNewerFile(path string, file bootstrap.File) (updated bool, newerOnDisk bo
 
 	info, err := f.Stat()
 	if err != nil {
-		return false, false, pkgerrors.WithMessagef(err, "reconcile failed to stat")
+		return false, false, errors.WithMessagef(err, "reconcile failed to stat")
 	}
 
 	if info.ModTime().Unix()-file.Timestamp.Unix() >= systemTimeSkew {
@@ -453,14 +485,14 @@ func (c *Cluster) bootstrap(ctx context.Context) error {
 	if c.managedDB != nil {
 		// Try to compare local config against the server we're joining.
 		if err := c.compareConfig(); err != nil {
-			return pkgerrors.WithMessage(err, "failed to validate server configuration")
+			return errors.WithMessage(err, "failed to validate server configuration")
 		}
 		// Try to bootstrap from the datastore using the local etcd proxy.
 		if data, err := c.getBootstrapData(ctx, c.clientAccessInfo.Password); err != nil {
 			logrus.Debugf("Failed to get bootstrap data from etcd proxy: %v", err)
 		} else {
 			if err := c.ReconcileBootstrapData(ctx, bytes.NewReader(data), &c.config.Runtime.ControlRuntimeBootstrap, false); err != nil {
-				logrus.Debugf("Failed to reconcile bootstrap data from etcd proxy: %v", err)
+				logrus.Debugf("Failed to reconcile with local datastore: %v", err)
 			} else {
 				return nil
 			}
@@ -507,6 +539,10 @@ func (c *Cluster) compareConfig() error {
 	if clusterControl.CriticalControlArgs.EgressSelectorMode == "" {
 		clusterControl.CriticalControlArgs.EgressSelectorMode = c.config.CriticalControlArgs.EgressSelectorMode
 	}
+	// If the remote server is down-level, for secrets-encryption-key-type
+	if clusterControl.CriticalControlArgs.EncryptProvider == "" {
+		clusterControl.CriticalControlArgs.EncryptProvider = c.config.CriticalControlArgs.EncryptProvider
+	}
 
 	if diff := deep.Equal(c.config.CriticalControlArgs, clusterControl.CriticalControlArgs); diff != nil {
 		rc := reflect.ValueOf(clusterControl.CriticalControlArgs).Type()
@@ -529,52 +565,4 @@ func ipsTo16Bytes(mySlice []*net.IPNet) {
 	for _, ipNet := range mySlice {
 		ipNet.IP = ipNet.IP.To16()
 	}
-}
-
-// reconcileEtcd starts a temporary single-member etcd cluster using a copy of the
-// etcd database, and uses it to reconcile bootstrap data. This is necessary
-// because the full etcd cluster may not have quorum during startup, but we still
-// need to extract data from the datastore.
-func (c *Cluster) reconcileEtcd(ctx context.Context) error {
-	logrus.Info("Starting temporary etcd to reconcile with datastore")
-
-	tempConfig := endpoint.ETCDConfig{Endpoints: []string{"http://127.0.0.1:2399"}}
-	originalConfig := c.config.Runtime.EtcdConfig
-	c.config.Runtime.EtcdConfig = tempConfig
-	reconcileCtx, cancel := context.WithCancel(ctx)
-
-	defer func() {
-		cancel()
-		c.config.Runtime.EtcdConfig = originalConfig
-	}()
-
-	e := etcd.NewETCD()
-	if err := e.SetControlConfig(c.config); err != nil {
-		return err
-	}
-	if err := e.StartEmbeddedTemporary(reconcileCtx); err != nil {
-		return err
-	}
-
-	for {
-		if err := e.Test(reconcileCtx); err != nil && !errors.Is(err, etcd.ErrNotMember) {
-			logrus.Infof("Failed to test temporary data store connection: %v", err)
-		} else {
-			logrus.Info(e.EndpointName() + " temporary data store connection OK")
-			break
-		}
-
-		select {
-		case <-time.After(5 * time.Second):
-		case <-reconcileCtx.Done():
-			break
-		}
-	}
-
-	data, err := c.readBootstrapFromDisk()
-	if err != nil {
-		return err
-	}
-
-	return c.ReconcileBootstrapData(reconcileCtx, bytes.NewReader(data.Bytes()), &c.config.Runtime.ControlRuntimeBootstrap, false)
 }
