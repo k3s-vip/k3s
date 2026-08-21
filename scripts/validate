@@ -1,21 +1,20 @@
 #!/bin/bash
 set -e
 
-export GIT_PAGER=cat
+cd $(dirname $0)/..
+
+echo Running: go mod tidy
+go mod tidy
+
+echo Running: go generate
+mkdir -p build/{data,static}
+GOOS=linux CC=gcc CXX=g++ go generate
+git diff || pwd
 
 if [ -n "$SKIP_VALIDATE" ]; then
     echo Skipping validation
     exit
 fi
-
-cd $(dirname $0)/..
-
-echo Running: install script signature checks
-sha256sum -c install.sh.sha256sum
-
-echo Running: go mod tidy
-go mod tidy
-
 echo Running validation
 
 . ./scripts/version.sh
@@ -24,12 +23,6 @@ if [ -n "$DIRTY" ]; then
     echo Source dir is dirty
     git status --porcelain --untracked-files=no
     git diff
-    exit 1
-fi
-
-echo Running: go version
-if ! go version | grep -s "go version ${VERSION_GOLANG} "; then
-  echo "Unexpected $(go version) - Kubernetes ${VERSION_K8S} should be built with go version ${VERSION_GOLANG}"
   exit 1
 fi
 

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,15 +36,16 @@ import (
 )
 
 var (
-	finalizerName          = "svccontroller." + version.Program + ".cattle.io/daemonset"
-	svcNameLabel           = "svccontroller." + version.Program + ".cattle.io/svcname"
-	svcNamespaceLabel      = "svccontroller." + version.Program + ".cattle.io/svcnamespace"
-	daemonsetNodeLabel     = "svccontroller." + version.Program + ".cattle.io/enablelb"
-	daemonsetNodePoolLabel = "svccontroller." + version.Program + ".cattle.io/lbpool"
-	nodeSelectorLabel      = "svccontroller." + version.Program + ".cattle.io/nodeselector"
-	priorityAnnotation     = "svccontroller." + version.Program + ".cattle.io/priorityclassname"
-	tolerationsAnnotation  = "svccontroller." + version.Program + ".cattle.io/tolerations"
-	controllerName         = names.ServiceLBController
+	finalizerName           = "svccontroller." + version.Program + ".cattle.io/daemonset"
+	svcNameLabel            = "svccontroller." + version.Program + ".cattle.io/svcname"
+	svcNamespaceLabel       = "svccontroller." + version.Program + ".cattle.io/svcnamespace"
+	daemonsetNodeLabel      = "svccontroller." + version.Program + ".cattle.io/enablelb"
+	daemonsetNodePoolLabel  = "svccontroller." + version.Program + ".cattle.io/lbpool"
+	daemonsetNodePoolPrefix = "lbpool.svccontroller." + version.Program + ".cattle.io/"
+	nodeSelectorLabel       = "svccontroller." + version.Program + ".cattle.io/nodeselector"
+	priorityAnnotation      = "svccontroller." + version.Program + ".cattle.io/priorityclassname"
+	tolerationsAnnotation   = "svccontroller." + version.Program + ".cattle.io/tolerations"
+	controllerName          = names.ServiceLBController
 )
 
 const (
@@ -54,7 +55,7 @@ const (
 )
 
 var (
-	DefaultLBImage = "rancher/klipper-lb:v0.4.15"
+	DefaultLBImage = "rancher/klipper-lb:v0.4.17"
 )
 
 func (k *k3s) Register(ctx context.Context,
@@ -388,8 +389,8 @@ func filterByIPFamily(ips []string, svc *core.Service) ([]string, error) {
 		}
 	}
 
-	sort.Strings(ipv4Addresses)
-	sort.Strings(ipv6Addresses)
+	slices.Sort(ipv4Addresses)
+	slices.Sort(ipv6Addresses)
 
 	for _, ipFamily := range svc.Spec.IPFamilies {
 		switch ipFamily {
@@ -489,11 +490,6 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 					SecurityContext:              securityContext,
 					Tolerations: []core.Toleration{
 						{
-							Key:      util.MasterRoleLabelKey,
-							Operator: "Exists",
-							Effect:   "NoSchedule",
-						},
-						{
 							Key:      util.ControlPlaneRoleLabelKey,
 							Operator: "Exists",
 							Effect:   "NoSchedule",
@@ -591,12 +587,11 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 		ds.Spec.Template.Spec.NodeSelector = map[string]string{
 			daemonsetNodeLabel: "true",
 		}
-		// Add node selector for "svccontroller.k3s.cattle.io/lbpool=<pool>" if service has lbpool label
-		if svc.Labels[daemonsetNodePoolLabel] != "" {
-			ds.Spec.Template.Spec.NodeSelector[daemonsetNodePoolLabel] = svc.Labels[daemonsetNodePoolLabel]
-		}
 		ds.Labels[nodeSelectorLabel] = "true"
 	}
+
+	// Restrict the DaemonSet to nodes in the pool named by the service's lbpool label, if set.
+	ds.Spec.Template.Spec.Affinity = nodePoolAffinity(svc.Labels[daemonsetNodePoolLabel])
 
 	// Fetch tolerations from the "svccontroller.k3s.cattle.io/tolerations" annotation on the service
 	// and append them to the DaemonSet's pod tolerations.
@@ -607,6 +602,39 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 	ds.Spec.Template.Spec.Tolerations = append(ds.Spec.Template.Spec.Tolerations, tolerations...)
 
 	return ds, nil
+}
+
+// nodePoolAffinity returns node affinity restricting pods to nodes belonging to the named pool,
+// or nil if no pool is named. A node is considered part of the pool if it is labeled with either
+// "svccontroller.k3s.cattle.io/lbpool=<pool>" or "lbpool.svccontroller.k3s.cattle.io/<pool>=true".
+// The two forms are listed as separate node selector terms, which are ORed by the scheduler, so
+// that nodes using the older single-pool label are still selected.
+func nodePoolAffinity(pool string) *core.Affinity {
+	if pool == "" {
+		return nil
+	}
+	return &core.Affinity{
+		NodeAffinity: &core.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &core.NodeSelector{
+				NodeSelectorTerms: []core.NodeSelectorTerm{
+					{
+						MatchExpressions: []core.NodeSelectorRequirement{{
+							Key:      daemonsetNodePoolLabel,
+							Operator: core.NodeSelectorOpIn,
+							Values:   []string{pool},
+						}},
+					},
+					{
+						MatchExpressions: []core.NodeSelectorRequirement{{
+							Key:      daemonsetNodePoolPrefix + pool,
+							Operator: core.NodeSelectorOpIn,
+							Values:   []string{"true"},
+						}},
+					},
+				},
+			},
+		},
+	}
 }
 
 // updateDaemonSets ensures that our DaemonSets have a NodeSelector present if one is enabled,
@@ -625,12 +653,14 @@ func (k *k3s) updateDaemonSets() error {
 	}
 
 	for _, ds := range daemonsets {
-		ds.Labels[nodeSelectorLabel] = fmt.Sprintf("%t", enableNodeSelector)
-		ds.Spec.Template.Spec.NodeSelector = map[string]string{}
+		// The cache returns pointers into the shared informer store, so copy before mutating.
+		updated := ds.DeepCopy()
+		updated.Labels[nodeSelectorLabel] = fmt.Sprintf("%t", enableNodeSelector)
+		updated.Spec.Template.Spec.NodeSelector = map[string]string{}
 		if enableNodeSelector {
-			ds.Spec.Template.Spec.NodeSelector[daemonsetNodeLabel] = "true"
+			updated.Spec.Template.Spec.NodeSelector[daemonsetNodeLabel] = "true"
 		}
-		if _, err := k.client.AppsV1().DaemonSets(ds.Namespace).Update(context.TODO(), ds, meta.UpdateOptions{}); err != nil {
+		if _, err := k.client.AppsV1().DaemonSets(updated.Namespace).Update(context.TODO(), updated, meta.UpdateOptions{}); err != nil {
 			return err
 		}
 	}
