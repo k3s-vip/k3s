@@ -15,20 +15,19 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/config"
-	"go.etcd.io/etcd/server/v3/etcdserver"
-	"go.etcd.io/etcd/server/v3/etcdserver/cindex"
+	etcderrors "go.etcd.io/etcd/server/v3/etcdserver/errors"
 	"go.etcd.io/etcd/server/v3/lease"
-	"go.etcd.io/etcd/server/v3/mvcc"
-	"go.etcd.io/etcd/server/v3/mvcc/backend"
+	"go.etcd.io/etcd/server/v3/storage/backend"
+	"go.etcd.io/etcd/server/v3/storage/mvcc"
+	"go.etcd.io/etcd/server/v3/storage/schema"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"google.golang.org/grpc"
 )
 
 // ReadCloser is a generic wrapper around a MVCC store that provides only read/close functions
 type ReadCloser interface {
-	List(ctx context.Context, key string, rev int64) ([]mvccpb.KeyValue, error)
-	Get(ctx context.Context, key string) (mvccpb.KeyValue, error)
+	List(ctx context.Context, key string, rev int64) ([]*mvccpb.KeyValue, error)
+	Get(ctx context.Context, key string) (*mvccpb.KeyValue, error)
 	Close() error
 }
 
@@ -63,41 +62,47 @@ func NewRemoteStore(config endpoint.ETCDConfig) (*RemoteStore, error) {
 
 	logrus.Infof("Opening etcd client connection with endpoints %v", config.Endpoints)
 
+	clientCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	c, err := clientv3.New(clientv3.Config{
-		Endpoints:   config.Endpoints,
-		DialTimeout: 5 * time.Second,
-		DialOptions: []grpc.DialOption{grpc.WithBlock(), grpc.FailOnNonTempDialError(true)},
-		Logger:      logger,
-		TLS:         tlsConfig,
+		Endpoints: config.Endpoints,
+		Logger:    logger,
+		TLS:       tlsConfig,
+		Context:   clientCtx,
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	if _, err := c.MemberList(clientCtx); err != nil {
+		return nil, errors.Join(err, c.Close())
+	}
+
 	return &RemoteStore{client: c}, nil
 }
 
-func (r *RemoteStore) List(ctx context.Context, key string, rev int64) ([]mvccpb.KeyValue, error) {
+func (r *RemoteStore) List(ctx context.Context, key string, rev int64) ([]*mvccpb.KeyValue, error) {
 	resp, err := r.client.Get(ctx, key, clientv3.WithPrefix(), clientv3.WithRev(rev))
 	if err != nil {
 		return nil, err
 	}
-	vals := make([]mvccpb.KeyValue, len(resp.Kvs))
+	vals := make([]*mvccpb.KeyValue, len(resp.Kvs))
 	for i := range resp.Kvs {
-		vals[i] = *resp.Kvs[i]
+		vals[i] = resp.Kvs[i]
 	}
 	return vals, nil
 }
 
-func (r *RemoteStore) Get(ctx context.Context, key string) (mvccpb.KeyValue, error) {
+func (r *RemoteStore) Get(ctx context.Context, key string) (*mvccpb.KeyValue, error) {
 	resp, err := r.client.Get(ctx, key)
 	if err != nil {
-		return mvccpb.KeyValue{}, err
+		return nil, err
 	}
 	if len(resp.Kvs) == 1 {
-		return *resp.Kvs[0], nil
+		return resp.Kvs[0], nil
 	}
-	return mvccpb.KeyValue{}, etcdserver.ErrKeyNotFound
+	return nil, etcderrors.ErrKeyNotFound
 }
 
 func (r *RemoteStore) Close() error {
@@ -194,11 +199,11 @@ func NewTemporaryStore(dataDir string) (*TemporaryStore, error) {
 	return &TemporaryStore{store: s, dataDir: tempDir}, nil
 }
 
-func (t *TemporaryStore) List(ctx context.Context, key string, rev int64) ([]mvccpb.KeyValue, error) {
+func (t *TemporaryStore) List(ctx context.Context, key string, rev int64) ([]*mvccpb.KeyValue, error) {
 	return t.store.List(ctx, key, rev)
 }
 
-func (t *TemporaryStore) Get(ctx context.Context, key string) (mvccpb.KeyValue, error) {
+func (t *TemporaryStore) Get(ctx context.Context, key string) (*mvccpb.KeyValue, error) {
 	return t.store.Get(ctx, key)
 }
 
@@ -258,8 +263,7 @@ func NewStore(dataDir string) (store *Store, rerr error) {
 	logrus.Infof("Opening etcd MVCC KV backend database at %s", path)
 
 	// open backend database
-	bcfg := backend.DefaultBackendConfig()
-	bcfg.Logger = logger
+	bcfg := backend.DefaultBackendConfig(logger)
 	bcfg.Path = path
 	bcfg.UnsafeNoFsync = true
 	bcfg.BatchInterval = time.Hour
@@ -274,7 +278,7 @@ func NewStore(dataDir string) (store *Store, rerr error) {
 
 	// try to get current index from backend; this may fail if the bbolt database
 	// was opened successfully but is in an inconsistent state.
-	if currentIndex, _ := cindex.ReadConsistentIndex(s.be.ReadTx()); currentIndex == 0 {
+	if currentIndex, _ := schema.ReadConsistentIndex(s.be.ReadTx()); currentIndex == 0 {
 		return nil, errors.New("failed to read consistent index")
 	}
 
@@ -309,23 +313,27 @@ func (s *Store) Close() error {
 	return errors.Join(errs...)
 }
 
-func (s *Store) List(ctx context.Context, key string, rev int64) ([]mvccpb.KeyValue, error) {
+func (s *Store) List(ctx context.Context, key string, rev int64) ([]*mvccpb.KeyValue, error) {
 	resp, err := s.kv.Range(ctx, []byte(key), []byte(key+"\xff"), mvcc.RangeOptions{Rev: rev})
 	if err != nil {
 		return nil, err
 	}
-	return resp.KVs, nil
+	respKVs := make([]*mvccpb.KeyValue, len(resp.KVs))
+	for i := range resp.KVs {
+		respKVs[i] = &resp.KVs[i]
+	}
+	return respKVs, nil
 }
 
-func (s *Store) Get(ctx context.Context, key string) (mvccpb.KeyValue, error) {
+func (s *Store) Get(ctx context.Context, key string) (*mvccpb.KeyValue, error) {
 	resp, err := s.kv.Range(ctx, []byte(key), nil, mvcc.RangeOptions{})
 	if err != nil {
-		return mvccpb.KeyValue{}, err
+		return nil, err
 	}
 
 	if len(resp.KVs) == 1 {
-		return resp.KVs[0], nil
+		return &resp.KVs[0], nil
 	}
 
-	return mvccpb.KeyValue{}, etcdserver.ErrKeyNotFound
+	return nil, etcderrors.ErrKeyNotFound
 }

@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 
-	helmchart "github.com/k3s-io/helm-controller/pkg/controllers/chart"
-	helmcommon "github.com/k3s-io/helm-controller/pkg/controllers/common"
 	"github.com/k3s-io/k3s/pkg/cli/cmds"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
@@ -29,15 +27,19 @@ import (
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/k3s/pkg/util/home"
+	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/util/permissions"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
+
+	helmchart "github.com/k3s-io/helm-controller/pkg/controllers/chart"
+	helmcommon "github.com/k3s-io/helm-controller/pkg/controllers/common"
 	"github.com/rancher/wrangler/v3/pkg/apply"
 	v1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
 	"github.com/rancher/wrangler/v3/pkg/leader"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 )
 
@@ -96,13 +98,11 @@ func StartServer(ctx context.Context, wg *sync.WaitGroup, config *Config, cfg *c
 }
 
 func startOnAPIServerReady(ctx context.Context, config *Config) {
-	select {
-	case <-ctx.Done():
+	if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
 		return
-	case <-executor.APIServerReadyChan():
-		if err := runControllers(ctx, config); err != nil {
-			logrus.Fatalf("failed to start controllers: %v", err)
-		}
+	}
+	if err := runControllers(ctx, config); err != nil {
+		logrus.Fatalf("failed to start controllers: %v", err)
 	}
 }
 
@@ -128,6 +128,7 @@ func runControllers(ctx context.Context, config *Config) error {
 	controlConfig.Runtime.K3s = sc.K3s
 	controlConfig.Runtime.Event = sc.Event
 	controlConfig.Runtime.Core = sc.Core
+	controlConfig.Runtime.Discovery = sc.Discovery
 
 	// Create a new context to use for wrangler controllers that is
 	// cancelled on a delay after the signal context. This allows other things
@@ -172,7 +173,7 @@ func runControllers(ctx context.Context, config *Config) error {
 	return nil
 }
 
-// apiServerControllers starts the core controllers, as well as the leader-elected controllers
+// apiserverControllers starts the core controllers, as well as the leader-elected controllers
 // that should only run on a control-plane node.
 func apiserverControllers(ctx context.Context, sc *Context, config *Config) {
 	if err := coreControllers(ctx, sc, config); err != nil {
@@ -217,14 +218,6 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 		return err
 	}
 
-	// Apply SystemDefaultRegistry setting to Helm before starting controllers.
-	// Internally helm-controller defaults to latest tag, but we inject a immutable version at build time.
-	if config.ControlConfig.HelmJobImage != "" {
-		helmchart.DefaultJobImage = config.ControlConfig.HelmJobImage
-	} else if config.ControlConfig.SystemDefaultRegistry != "" {
-		helmchart.DefaultJobImage = config.ControlConfig.SystemDefaultRegistry + "/" + helmchart.DefaultJobImage
-	}
-
 	if sc.Helm != nil {
 		restConfig, err := util.GetRESTConfig(config.ControlConfig.Runtime.KubeConfigSupervisor)
 		if err != nil {
@@ -237,6 +230,7 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 			return err
 		}
 
+		ctx := logger.NewContext(ctx, "helm-controller")
 		apply := apply.New(k8s, apply.NewClientFactory(restConfig)).WithDynamicLookup().WithSetOwnerReference(false, false)
 		helm := sc.Helm.WithAgent(restConfig.UserAgent)
 		batch := sc.Batch.WithAgent(restConfig.UserAgent)
@@ -247,20 +241,12 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 			helmcommon.Name,
 			"cluster-admin",
 			strconv.Itoa(config.ControlConfig.HTTPSPort),
-			k8s,
 			apply,
-			util.BuildControllerEventRecorder(k8s, helmcommon.Name, metav1.NamespaceAll),
-			helm.V1().HelmChart(),
-			helm.V1().HelmChart().Cache(),
-			helm.V1().HelmChartConfig(),
-			helm.V1().HelmChartConfig().Cache(),
-			batch.V1().Job(),
-			batch.V1().Job().Cache(),
-			auth.V1().ClusterRoleBinding(),
-			core.V1().ServiceAccount(),
-			core.V1().ConfigMap(),
-			core.V1().Secret(),
-			core.V1().Secret().Cache())
+			util.BuildControllerEventRecorder(ctx, k8s, helmcommon.Name, metav1.NamespaceAll),
+			batch.V1(),
+			core.V1(),
+			helm.V1(),
+			auth.V1())
 	}
 
 	if config.ControlConfig.Rootless {
@@ -443,7 +429,7 @@ func writeKubeConfig(certs string, config *Config) error {
 		}
 	}
 
-	if err = clientaccess.WriteClientKubeConfig(kubeConfig, url, config.ControlConfig.Runtime.ServerCA, config.ControlConfig.Runtime.ClientAdminCert,
+	if err = clientaccess.WriteClientKubeConfig(kubeConfig, config.ControlConfig.KubeConfigName, url, config.ControlConfig.Runtime.ServerCA, config.ControlConfig.Runtime.ClientAdminCert,
 		config.ControlConfig.Runtime.ClientAdminKey); err == nil {
 		logrus.Infof("Wrote kubeconfig %s", kubeConfig)
 	} else {
@@ -559,11 +545,9 @@ func setNodeLabelsAndAnnotations(ctx context.Context, nodes v1.NodeClient, confi
 			return false, nil
 		}
 
-		patch := util.NewPatchList()
-		patch.Add("true", "metadata", "labels", util.ControlPlaneRoleLabelKey)
-		patch.Add("true", "metadata", "labels", util.MasterRoleLabelKey)
+		patch := util.NewPatchList().Add("true", "metadata", "labels", util.ControlPlaneRoleLabelKey)
 		if _, err := patcher.Patch(ctx, patch, nodeName); err != nil {
-			logrus.Infof("Unable to set master and control-plane role labels: %v", err)
+			logrus.Infof("Unable to set control-plane role label: %v", err)
 			return false, nil
 		}
 
@@ -604,19 +588,12 @@ func setClusterDNSConfig(ctx context.Context, config *Config, configMap v1.Confi
 			"clusterDomain": clusterDomain,
 		},
 	}
-	for {
-		_, err = configMap.Create(c)
-		if err == nil {
-			logrus.Infof("Cluster dns configmap has been set successfully")
-			break
+	return wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+		if _, err := configMap.Create(c); err != nil {
+			logrus.Infof("Waiting for control-plane dns startup: %v", err)
+			return false, nil
 		}
-		logrus.Infof("Waiting for control-plane dns startup: %v", err)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
-	}
-	return nil
+		logrus.Infof("Cluster dns configmap has been set successfully")
+		return true, nil
+	})
 }

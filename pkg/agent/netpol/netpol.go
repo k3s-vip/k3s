@@ -13,13 +13,14 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/tools/cache"
 	cloudproviderapi "k8s.io/cloud-provider/api"
 
 	"github.com/cloudnativelabs/kube-router/v2/pkg/controllers/netpol"
 	"github.com/cloudnativelabs/kube-router/v2/pkg/healthcheck"
 	krmetrics "github.com/cloudnativelabs/kube-router/v2/pkg/metrics"
 	"github.com/cloudnativelabs/kube-router/v2/pkg/options"
+	"github.com/cloudnativelabs/kube-router/v2/pkg/svcip"
 	"github.com/cloudnativelabs/kube-router/v2/pkg/utils"
 	"github.com/cloudnativelabs/kube-router/v2/pkg/version"
 	"github.com/coreos/go-iptables/iptables"
@@ -38,6 +39,19 @@ func init() {
 	krmetrics.DefaultRegisterer = metrics.DefaultRegisterer
 	krmetrics.DefaultGatherer = metrics.DefaultGatherer
 }
+
+// sharedInformers bundles every informer we start so that we can hand a single value to each controller.
+// Each controller declares its own narrow interface over this (routing.Informers, proxy.Informers, and so on)
+// and therefore only ever sees the informers it actually watches.
+type sharedInformers struct {
+	pods            cache.SharedIndexInformer
+	namespaces      cache.SharedIndexInformer
+	networkPolicies cache.SharedIndexInformer
+}
+
+func (s *sharedInformers) Pods() cache.SharedIndexInformer            { return s.pods }
+func (s *sharedInformers) Namespaces() cache.SharedIndexInformer      { return s.namespaces }
+func (s *sharedInformers) NetworkPolicies() cache.SharedIndexInformer { return s.networkPolicies }
 
 // Run creates and starts a new instance of the kube-router network policy controller
 // The code in this function is cribbed from the upstream controller at:
@@ -70,14 +84,8 @@ func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error
 	// Wait until the ready condition is updated and the uninitialized taint has
 	// been removed, at which point the addresses should be synced.
 	startTime := time.Now().Truncate(time.Second)
-	if err := wait.PollUntilContextTimeout(ctx, 2*time.Second, util.DefaultAPIServerReadyTimeout, true, func(ctx context.Context) (bool, error) {
+	if err := util.WaitForNode(ctx, client, nodeConfig.AgentConfig.NodeName, func(node *v1.Node) (bool, error) {
 		var readyTime metav1.Time
-		// Get the node object
-		node, err := client.CoreV1().Nodes().Get(ctx, nodeConfig.AgentConfig.NodeName, metav1.GetOptions{})
-		if err != nil {
-			logrus.Infof("Network policy controller waiting to get Node %s: %v", nodeConfig.AgentConfig.NodeName, err)
-			return false, nil
-		}
 		for _, cond := range node.Status.Conditions {
 			if cond.Type == v1.NodeReady && cond.Status == v1.ConditionTrue {
 				readyTime = cond.LastHeartbeatTime
@@ -118,9 +126,11 @@ func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error
 	healthCh := make(chan *healthcheck.ControllerHeartbeat)
 
 	informerFactory := informers.NewSharedInformerFactory(client, 0)
-	podInformer := informerFactory.Core().V1().Pods().Informer()
-	nsInformer := informerFactory.Core().V1().Namespaces().Informer()
-	npInformer := informerFactory.Networking().V1().NetworkPolicies().Informer()
+	krInformers := &sharedInformers{
+		pods:            informerFactory.Core().V1().Pods().Informer(),
+		namespaces:      informerFactory.Core().V1().Namespaces().Informer(),
+		networkPolicies: informerFactory.Networking().V1().NetworkPolicies().Informer(),
+	}
 	informerFactory.Start(stopCh)
 	informerFactory.WaitForCacheSync(stopCh)
 
@@ -176,15 +186,32 @@ func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error
 	wg.Add(1)
 	go metricsRunCheck(mc, healthCh, stopCh, wg)
 
-	npc, err := netpol.NewNetworkPolicyController(client, krConfig, podInformer, npInformer, nsInformer, &sync.Mutex{}, nil,
-		iptablesCmdHandlers, ipSetHandlers)
+	ipValidator, err := svcip.NewValidator(svcip.Config{
+		ExternalIPCIDRs:   krConfig.ExternalIPCIDRs,
+		LoadBalancerCIDRs: krConfig.LoadBalancerCIDRs,
+		ClusterIPCIDRs:    krConfig.ClusterIPCIDRs,
+		StrictValidation:  krConfig.StrictExternalIPValidation,
+		EnableIPv4:        krConfig.EnableIPv4,
+		EnableIPv6:        krConfig.EnableIPv6,
+	})
+	if err != nil {
+		return errors.WithMessage(err, "failed to create service IP validator")
+	}
+	ipValidator.LogStatus()
+
+	knftablesInterfaces, err := netpol.NewKnftablesInterfaces(ctx, krConfig)
+	if err != nil {
+		return errors.WithMessage(err, "failed to create knftables interfaces")
+	}
+	npc, err := netpol.NewNetworkPolicyController(client, krConfig, krInformers, &sync.Mutex{}, nil,
+		iptablesCmdHandlers, ipSetHandlers, ipValidator, knftablesInterfaces)
 	if err != nil {
 		return errors.WithMessage(err, "unable to initialize network policy controller")
 	}
 
-	podInformer.AddEventHandler(npc.PodEventHandler)
-	nsInformer.AddEventHandler(npc.NamespaceEventHandler)
-	npInformer.AddEventHandler(npc.NetworkPolicyEventHandler)
+	krInformers.Pods().AddEventHandler(npc.PodEventHandler())
+	krInformers.Namespaces().AddEventHandler(npc.NamespaceEventHandler())
+	krInformers.NetworkPolicies().AddEventHandler(npc.NetworkPolicyEventHandler())
 
 	wg.Add(1)
 	logrus.Infof("Starting network policy controller version %s, built on %s, %s", version.Version, version.BuildDate, runtime.Version())
