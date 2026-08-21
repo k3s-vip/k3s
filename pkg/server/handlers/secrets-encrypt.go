@@ -88,9 +88,8 @@ func encryptionStatus(control *config.Control) (EncryptionState, error) {
 	}
 	if providers[len(providers)-1].Identity != nil && (providers[0].AESCBC != nil || providers[0].Secretbox != nil) {
 		state.Enable = ptr.To(true)
-	} else if control.EncryptSecrets && providers[0].Identity != nil && len(providers) == 1 {
-		state.Enable = ptr.To(false)
-	} else if !control.EncryptSecrets || providers[0].Identity != nil && (providers[1].AESCBC != nil || providers[1].Secretbox != nil) {
+	} else if (control.EncryptSecrets && providers[0].Identity != nil && len(providers) == 1) ||
+		(!control.EncryptSecrets || providers[0].Identity != nil && (providers[1].AESCBC != nil || providers[1].Secretbox != nil)) {
 		state.Enable = ptr.To(false)
 	}
 
@@ -454,7 +453,7 @@ func updateSecrets(ctx context.Context, control *config.Control, nodeName string
 	}
 
 	// For backwards compatibility with the old controller, we use an event recorder instead of logrus
-	recorder := util.BuildControllerEventRecorder(k8s, "secrets-reencrypt", metav1.NamespaceDefault)
+	recorder := util.BuildControllerEventRecorder(ctx, k8s, "secrets-reencrypt", metav1.NamespaceDefault)
 
 	secretPager := pager.New(pager.SimplePageFunc(func(opts metav1.ListOptions) (runtime.Object, error) {
 		return k8s.CoreV1().Secrets(metav1.NamespaceAll).List(ctx, opts)

@@ -34,6 +34,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/spegel"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
@@ -99,7 +100,14 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 	if err != nil {
 		return errors.WithMessage(err, "failed to validate kube-proxy conntrack configuration")
 	}
-	syssetup.Configure(enableIPv6, conntrackConfig)
+	// The net/bridge/bridge-nf-call-{ip,ip6}tables sysctls are only required by kube-proxy
+	// and flannel. When both are disabled the node is using an alternative CNI, so leave
+	// these sysctls untouched for the administrator to manage. See
+	// https://github.com/k3s-io/k3s/issues/14022. The flannel backend is compared against the
+	// "none" literal rather than flannel.BackendNone to avoid importing the flannel package,
+	// which registers all flannel backends via init().
+	setBridgeFilter := !config.KubeProxyDisabled(ctx, nodeConfig, proxy) || nodeConfig.Flannel.Backend != "none"
+	syssetup.Configure(enableIPv6, setBridgeFilter, conntrackConfig)
 	nodeConfig.AgentConfig.EnableIPv4 = enableIPv4
 	nodeConfig.AgentConfig.EnableIPv6 = enableIPv6
 
@@ -152,7 +160,9 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 	}
 
 	go func() {
-		<-executor.APIServerReadyChan()
+		if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
+			return
+		}
 		if err := startNetwork(ctx, &sync.WaitGroup{}, nodeConfig); err != nil {
 			signals.RequestShutdown(errors.WithMessage(err, "failed to start networking"))
 			return
@@ -321,7 +331,7 @@ func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Pr
 		return nil, err
 	}
 
-	_, nodeIPs, err := util.GetHostnameAndIPs(cfg.NodeName, cfg.NodeIP.Value())
+	_, nodeIPs, err := util.GetHostnameAndIPs(ctx, cfg.NodeName, cfg.NodeIP.Value())
 	if err != nil {
 		return nil, errors.WithMessage(err, "failed to get node name and addresses")
 	}
@@ -336,21 +346,15 @@ func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Pr
 		clientaccess.WithClientCertificate(clientKubeletCert, clientKubeletKey),
 	}
 
-	for {
+	return proxy, wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
 		newToken, err := clientaccess.ParseAndValidateToken(proxy.SupervisorURL(), cfg.Token, options...)
 		if err != nil {
 			logrus.Errorf("Failed to validate connection to cluster at %s: %v", cfg.ServerURL, err)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(2 * time.Second):
-			}
-			continue
+			return false, nil
 		}
 		cfg.Token = newToken.String()
-		break
-	}
-	return proxy, nil
+		return true, nil
+	})
 }
 
 // configureNode waits for the node object to be created, and if/when it does,

@@ -13,6 +13,7 @@ import (
 
 	"github.com/k3s-io/k3s/pkg/cli/cmds"
 	daemonconfig "github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	yaml2 "gopkg.in/yaml.v2"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	"sigs.k8s.io/yaml"
@@ -28,24 +29,25 @@ var (
 // The enableMaintenance flag enables attempts to perform corrective maintenance during the test process.
 type TestFunc func(ctx context.Context, enableMaintenance bool) error
 
+// Executor is a set of functions for bootstrapping a node and starting the CRI, CNI, and Kubernetes components
 type Executor interface {
 	Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node, cfg cmds.Agent) error
 	Kubelet(ctx context.Context, args []string) error
 	KubeProxy(ctx context.Context, args []string) error
 	APIServerHandlers(ctx context.Context) (authenticator.Request, http.Handler, error)
 	APIServer(ctx context.Context, args []string) error
-	Scheduler(ctx context.Context, nodeReady <-chan struct{}, args []string) error
+	Scheduler(ctx context.Context, nodeReady *wait.Chan, args []string) error
 	ControllerManager(ctx context.Context, args []string) error
 	CurrentETCDOptions() (InitialOptions, error)
 	ETCD(ctx context.Context, wg *sync.WaitGroup, args *ETCDConfig, extraArgs []string, test TestFunc) error
-	CloudControllerManager(ctx context.Context, ccmRBACReady <-chan struct{}, args []string) error
+	CloudControllerManager(ctx context.Context, ccmRBACReady *wait.Chan, args []string) error
 	Containerd(ctx context.Context, node *daemonconfig.Node) error
 	Docker(ctx context.Context, node *daemonconfig.Node) error
 	CRI(ctx context.Context, node *daemonconfig.Node) error
 	CNI(ctx context.Context, wg *sync.WaitGroup, node *daemonconfig.Node) error
-	APIServerReadyChan() <-chan struct{}
-	ETCDReadyChan() <-chan struct{}
-	CRIReadyChan() <-chan struct{}
+	APIServerReadyChan() *wait.Chan
+	ETCDReadyChan() *wait.Chan
+	CRIReadyChan() *wait.Chan
 	IsSelfHosted() bool
 }
 
@@ -76,6 +78,8 @@ type ETCDConfig struct {
 
 	ExperimentalInitialCorruptCheck         bool          `json:"experimental-initial-corrupt-check"`
 	ExperimentalWatchProgressNotifyInterval time.Duration `json:"experimental-watch-progress-notify-interval"`
+
+	BootstrapDefragThresholdMegabytes uint `json:"bootstrap-defrag-threshold-megabytes,omitempty"`
 }
 
 type ServerTrust struct {
@@ -155,6 +159,10 @@ func Set(driver Executor) {
 	executor = driver
 }
 
+func Get() Executor {
+	return executor
+}
+
 func Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node, cfg cmds.Agent) error {
 	if executor == nil {
 		return ErrNotInitialized
@@ -190,7 +198,7 @@ func APIServer(ctx context.Context, args []string) error {
 	return executor.APIServer(ctx, args)
 }
 
-func Scheduler(ctx context.Context, nodeReady <-chan struct{}, args []string) error {
+func Scheduler(ctx context.Context, nodeReady *wait.Chan, args []string) error {
 	if executor == nil {
 		return ErrNotInitialized
 	}
@@ -218,7 +226,7 @@ func ETCD(ctx context.Context, wg *sync.WaitGroup, args *ETCDConfig, extraArgs [
 	return executor.ETCD(ctx, wg, args, extraArgs, test)
 }
 
-func CloudControllerManager(ctx context.Context, ccmRBACReady <-chan struct{}, args []string) error {
+func CloudControllerManager(ctx context.Context, ccmRBACReady *wait.Chan, args []string) error {
 	if executor == nil {
 		return ErrNotInitialized
 	}
@@ -250,21 +258,21 @@ func CNI(ctx context.Context, wg *sync.WaitGroup, config *daemonconfig.Node) err
 	return executor.CNI(ctx, wg, config)
 }
 
-func APIServerReadyChan() <-chan struct{} {
+func APIServerReadyChan() *wait.Chan {
 	if executor == nil {
 		return nil
 	}
 	return executor.APIServerReadyChan()
 }
 
-func ETCDReadyChan() <-chan struct{} {
+func ETCDReadyChan() *wait.Chan {
 	if executor == nil {
 		return nil
 	}
 	return executor.ETCDReadyChan()
 }
 
-func CRIReadyChan() <-chan struct{} {
+func CRIReadyChan() *wait.Chan {
 	if executor == nil {
 		return nil
 	}
@@ -276,11 +284,4 @@ func IsSelfHosted() bool {
 		return false
 	}
 	return executor.IsSelfHosted()
-}
-
-func CloseIfNilErr(err error, ch chan struct{}) error {
-	if err == nil {
-		close(ch)
-	}
-	return err
 }

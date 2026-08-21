@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/k3s-io/k3s/pkg/util/errors"
-	"github.com/opencontainers/cgroups"
+	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/rootless-containers/rootlesskit/pkg/child"
 	"github.com/rootless-containers/rootlesskit/pkg/copyup/tmpfssymlink"
 	"github.com/rootless-containers/rootlesskit/pkg/network/slirp4netns"

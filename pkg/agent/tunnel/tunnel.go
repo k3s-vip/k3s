@@ -19,17 +19,19 @@ import (
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/rancher/remotedialer"
 	"github.com/sirupsen/logrus"
 	"github.com/yl2chen/cidranger"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	v1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	toolscache "k8s.io/client-go/tools/cache"
@@ -70,7 +72,7 @@ func (p *podEntry) Network() net.IPNet {
 }
 
 // Setup sets up the agent tunnel, which is reponsible for connecting websocket tunnels to
-// control-plane nodes, syncing endpoints for the tunnel authorizer, and updating proxy endpoints.
+// control-plane nodes, syncing endpointslices for the tunnel authorizer, and updating proxy endpoints.
 func Setup(ctx context.Context, config *daemonconfig.Node, proxy proxy.Proxy) error {
 	client, err := util.GetClientSet(config.AgentConfig.KubeConfigK3sController)
 	if err != nil {
@@ -103,22 +105,28 @@ func Setup(ctx context.Context, config *daemonconfig.Node, proxy proxy.Proxy) er
 	return nil
 }
 
-// startWatches starts watching for changes to endpoints, both for the tunnel authorizer,
+// startWatches starts watching for changes to endpointslices, both for the tunnel authorizer,
 // and to sync supervisor addresses into the proxy. This will block until the context is cancelled.
 func (a *agentTunnel) startWatches(ctx context.Context, config *daemonconfig.Node, proxy proxy.Proxy) {
-	rbacReady := make(chan struct{})
+	rbacReady := wait.New()
 	go func() {
-		<-executor.APIServerReadyChan()
+		if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
+			rbacReady.MarkFailed(err)
+			return
+		}
 		if err := util.WaitForRBACReady(ctx, config.AgentConfig.KubeConfigK3sController, util.DefaultAPIServerReadyTimeout, authorizationv1.ResourceAttributes{
 			Namespace: metav1.NamespaceDefault,
 			Verb:      "list",
-			Resource:  "endpoints",
+			Group:     "discovery.k8s.io",
+			Resource:  "endpointslices",
 		}, ""); err != nil {
-			signals.RequestShutdown(errors.WithMessage(err, "tunnel watches failed to wait for RBAC"))
+			err = errors.WithMessage(err, "tunnel watches failed to wait for RBAC")
+			rbacReady.MarkFailed(err)
+			signals.RequestShutdown(err)
 			return
 		}
 
-		close(rbacReady)
+		rbacReady.MarkReady()
 	}()
 
 	// We don't need to run the tunnel authorizer if the container runtime endpoint is /dev/null,
@@ -151,7 +159,7 @@ func (a *agentTunnel) startWatches(ctx context.Context, config *daemonconfig.Nod
 	if proxy.IsSupervisorLBEnabled() && proxy.SupervisorURL() != "" {
 		logrus.Info("Getting list of apiserver endpoints from server")
 		// If not running an apiserver locally, try to get a list of apiservers from the server we're
-		// connecting to. If that fails, fall back to querying the endpoints list from Kubernetes. This
+		// connecting to. If that fails, fall back to querying the endpointslice list from Kubernetes. This
 		// fallback requires that the server we're joining be running an apiserver, but is the only safe
 		// thing to do if its supervisor is down-level and can't provide us with an endpoint list.
 		addresses := agentconfig.WaitForAPIServers(ctx, config, proxy)
@@ -162,11 +170,12 @@ func (a *agentTunnel) startWatches(ctx context.Context, config *daemonconfig.Nod
 			}
 			proxy.Update(addresses)
 		} else {
-			if endpoint, err := a.client.CoreV1().Endpoints(metav1.NamespaceDefault).Get(ctx, "kubernetes", metav1.GetOptions{}); err != nil {
-				logrus.Errorf("Failed to get apiserver addresses from kubernetes endpoints: %v", err)
+			labelSelector := labels.Set{discoveryv1.LabelServiceName: "kubernetes"}.String()
+			if endpointSlices, err := a.client.DiscoveryV1().EndpointSlices(metav1.NamespaceDefault).List(ctx, metav1.ListOptions{LabelSelector: labelSelector}); err != nil {
+				logrus.Errorf("Failed to get apiserver addresses from kubernetes endpointslices: %v", err)
 			} else {
-				addresses := util.GetAddresses(endpoint)
-				logrus.Infof("Got apiserver addresses from kubernetes endpoints: %v", addresses)
+				addresses := util.GetAddressesFromSlices(endpointSlices.Items...)
+				logrus.Infof("Got apiserver addresses from kubernetes endpointslice: %v", addresses)
 				if len(addresses) > 0 {
 					proxy.Update(addresses)
 				}
@@ -174,21 +183,16 @@ func (a *agentTunnel) startWatches(ctx context.Context, config *daemonconfig.Nod
 		}
 	}
 
-	a.watchEndpoints(ctx, rbacReady, config, proxy)
+	a.watchEndpointSlices(ctx, rbacReady, config, proxy)
 }
 
 // setKubeletPort retrieves the configured kubelet port from our node object
-func (a *agentTunnel) setKubeletPort(ctx context.Context, rbacReady <-chan struct{}) {
-	<-rbacReady
-
-	wait.PollUntilContextTimeout(ctx, time.Second, util.DefaultAPIServerReadyTimeout, true, func(ctx context.Context) (bool, error) {
+func (a *agentTunnel) setKubeletPort(ctx context.Context, rbacReady *wait.Chan) {
+	if err := rbacReady.Wait(ctx); err != nil {
+		return
+	}
+	util.WaitForNode(ctx, a.client, os.Getenv("NODE_NAME"), func(node *v1.Node) (bool, error) {
 		var readyTime metav1.Time
-		nodeName := os.Getenv("NODE_NAME")
-		node, err := a.client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-		if err != nil {
-			logrus.Debugf("Tunnel authorizer failed to get Kubelet Port: %v", err)
-			return false, nil
-		}
 		for _, cond := range node.Status.Conditions {
 			if cond.Type == v1.NodeReady && cond.Status == v1.ConditionTrue {
 				readyTime = cond.LastHeartbeatTime
@@ -225,7 +229,7 @@ func (a *agentTunnel) clusterAuth(config *daemonconfig.Node) {
 
 // watchPods watches for pods assigned to this node, adding their IPs to the CIDR list.
 // If the pod uses host network, we instead add the
-func (a *agentTunnel) watchPods(ctx context.Context, rbacReady <-chan struct{}, config *daemonconfig.Node) {
+func (a *agentTunnel) watchPods(ctx context.Context, rbacReady *wait.Chan, config *daemonconfig.Node) {
 	for _, ip := range config.AgentConfig.NodeIPs {
 		if cidr, err := util.IPToIPNet(ip); err == nil {
 			logrus.Infof("Tunnel authorizer adding Node IP %s", cidr)
@@ -233,7 +237,9 @@ func (a *agentTunnel) watchPods(ctx context.Context, rbacReady <-chan struct{}, 
 		}
 	}
 
-	<-rbacReady
+	if err := rbacReady.Wait(ctx); err != nil {
+		return
+	}
 
 	nodeName := os.Getenv("NODE_NAME")
 	lw := toolscache.NewListWatchFromClient(a.client.CoreV1().RESTClient(), "pods", metav1.NamespaceAll, fields.OneTermEqualSelector("spec.nodeName", nodeName))
@@ -287,17 +293,20 @@ func (a *agentTunnel) watchPods(ctx context.Context, rbacReady <-chan struct{}, 
 	}
 }
 
-// WatchEndpoints attempts to create tunnels to all supervisor addresses.  Once the
+// WatchEndpointSlices attempts to create tunnels to all supervisor addresses.  Once the
 // apiserver is up, go into a watch loop, adding and removing tunnels as endpoints come
 // and go from the cluster.
-func (a *agentTunnel) watchEndpoints(ctx context.Context, rbacReady <-chan struct{}, node *daemonconfig.Node, proxy proxy.Proxy) {
+func (a *agentTunnel) watchEndpointSlices(ctx context.Context, rbacReady *wait.Chan, node *daemonconfig.Node, proxy proxy.Proxy) {
 	syncProxyAddresses := a.getProxySyncer(ctx, proxy)
 	refreshFromSupervisor := getAPIServersRequester(node, proxy, syncProxyAddresses)
 
-	<-rbacReady
+	if err := rbacReady.Wait(ctx); err != nil {
+		return
+	}
 
-	lw := toolscache.NewListWatchFromClient(a.client.CoreV1().RESTClient(), "endpoints", metav1.NamespaceDefault, fields.OneTermEqualSelector(metav1.ObjectNameField, "kubernetes"))
-	_, _, watch, done := toolswatch.NewIndexerInformerWatcher(wrapListWithRefresh(ctx, lw, refreshFromSupervisor), &v1.Endpoints{})
+	labelSelector := labels.Set{discoveryv1.LabelServiceName: "kubernetes"}.String()
+	lw := toolscache.NewFilteredListWatchFromClient(a.client.DiscoveryV1().RESTClient(), "endpointslices", metav1.NamespaceDefault, func(options *metav1.ListOptions) { options.LabelSelector = labelSelector })
+	_, _, watch, done := toolswatch.NewIndexerInformerWatcher(wrapListWithRefresh(ctx, lw, refreshFromSupervisor), &discoveryv1.EndpointSlice{})
 
 	defer func() {
 		watch.Stop()
@@ -309,9 +318,9 @@ func (a *agentTunnel) watchEndpoints(ctx context.Context, rbacReady <-chan struc
 		case <-ctx.Done():
 			return
 		case ev, ok := <-watch.ResultChan():
-			endpoint, ok := ev.Object.(*v1.Endpoints)
+			endpointslice, ok := ev.Object.(*discoveryv1.EndpointSlice)
 			if !ok {
-				logrus.Errorf("Tunnel watch failed: event object not of type v1.Endpoints")
+				logrus.Errorf("Tunnel watch failed: event object not of type discoveryv1.EndpointSlice")
 				continue
 			}
 
@@ -321,7 +330,7 @@ func (a *agentTunnel) watchEndpoints(ctx context.Context, rbacReady <-chan struc
 			// goroutine that sleeps for a short period before checking for changes and updating
 			// the proxy addresses.  If another update occurs, the previous update operation
 			// will be cancelled and a new one queued.
-			addresses := util.GetAddresses(endpoint)
+			addresses := util.GetAddressesFromSlices(*endpointslice)
 			logrus.Debugf("Syncing apiserver addresses from tunnel watch: %v", addresses)
 			syncProxyAddresses(addresses)
 		}
@@ -382,20 +391,18 @@ func (a *agentTunnel) connect(rootCtx context.Context, address string) agentConn
 
 	// Start remotedialer connect loop in a goroutine to ensure a connection to the target server
 	go func() {
-		for {
+		wait.PollUntilContextCancel(ctx, endpointDebounceDelay, true, func(ctx context.Context) (bool, error) {
 			// ConnectToProxy blocks until error or context cancellation
 			err := remotedialer.ConnectToProxyWithDialer(ctx, wsURL, nil, auth, ws, a.dialContext, onConnect)
 			status = loadbalancer.HealthCheckResultFailed
 			if err != nil && !errors.Is(err, context.Canceled) {
 				logrus.WithField("url", wsURL).WithError(err).Error("Remotedialer proxy error; reconnecting...")
 				// wait between reconnection attempts to avoid hammering the server
-				time.Sleep(endpointDebounceDelay)
+				return false, nil
 			}
 			// If the context has been cancelled, exit the goroutine instead of retrying
-			if ctx.Err() != nil {
-				return
-			}
-		}
+			return true, nil
+		})
 	}()
 
 	return agentConnection{

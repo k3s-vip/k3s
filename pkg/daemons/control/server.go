@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/k3s-io/k3s/pkg/authenticator"
 	"github.com/k3s-io/k3s/pkg/cluster"
@@ -17,16 +16,12 @@ import (
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apimachinery/pkg/watch"
-	toolscache "k8s.io/client-go/tools/cache"
-	toolswatch "k8s.io/client-go/tools/watch"
 	cloudproviderapi "k8s.io/cloud-provider/api"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
@@ -177,14 +172,15 @@ func scheduler(ctx context.Context, cfg *config.Control) error {
 		argsMap["vmodule"] = cfg.VModule
 	}
 
-	args := util.GetArgs(argsMap, cfg.ExtraSchedulerAPIArgs)
+	args := util.GetArgs(argsMap, cfg.ExtraSchedulerArgs)
 
-	nodeReady := make(chan struct{})
+	nodeReady := wait.New()
 
 	go func() {
-		defer close(nodeReady)
-
-		<-executor.APIServerReadyChan()
+		if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
+			nodeReady.MarkFailed(err)
+			return
+		}
 
 		// If we're running the embedded cloud controller, wait for it to untaint at least one
 		// node (usually, the local node) before starting the scheduler to ensure that it
@@ -193,9 +189,13 @@ func scheduler(ctx context.Context, cfg *config.Control) error {
 			logrus.Infof("Waiting for untainted node")
 			// this waits forever for an untainted node; if it returns ErrWaitTimeout the context has been cancelled, and it is not a fatal error
 			if err := waitForUntaintedNode(ctx, runtime.KubeConfigScheduler); err != nil && !errors.Is(err, wait.ErrWaitTimeout) {
-				signals.RequestShutdown(errors.WithMessage(err, "failed to wait for untained node"))
+				err = errors.WithMessage(err, "failed to wait for untained node")
+				nodeReady.MarkFailed(err)
+				signals.RequestShutdown(err)
+				return
 			}
 		}
+		nodeReady.MarkReady()
 	}()
 
 	logrus.Infof("Running kube-scheduler %s", config.ArgString(args))
@@ -394,43 +394,52 @@ func cloudControllerManager(ctx context.Context, cfg *config.Control) error {
 
 	logrus.Infof("Running cloud-controller-manager %s", config.ArgString(args))
 
-	ccmRBACReady := make(chan struct{})
+	ccmRBACReady := wait.New()
 
 	go func() {
-		defer close(ccmRBACReady)
-
-		<-executor.APIServerReadyChan()
-
-		logrus.Infof("Waiting for cloud-controller-manager privileges to become available")
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case err := <-promise(func() error { return checkForCloudControllerPrivileges(ctx, cfg.Runtime, 5*time.Second) }):
-				if err != nil {
-					logrus.Infof("Waiting for cloud-controller-manager privileges to become available: %v", err)
-					continue
-				}
-				return
-			}
+		if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
+			ccmRBACReady.MarkFailed(err)
+			return
 		}
-	}()
 
+		if err := checkForCloudControllerPrivileges(ctx, cfg.Runtime); err != nil {
+			err = errors.WithMessage(err, "failed to wait for cloud-controller-manager RBAC")
+			ccmRBACReady.MarkFailed(err)
+			signals.RequestShutdown(err)
+			return
+		}
+		ccmRBACReady.MarkReady()
+	}()
 	return executor.CloudControllerManager(ctx, ccmRBACReady, args)
 }
 
 // checkForCloudControllerPrivileges makes a SubjectAccessReview request to the apiserver
 // to validate that the embedded cloud controller manager has the required privileges,
-// and does not return until the requested access is granted.
+// and does not return until the requested access is granted. Both the K3s RBAC, and the
+// core extension-apiserver-authentication-reader RBAC, are checked.
 // If the CCM RBAC changes, the ResourceAttributes checked for by this function should
 // be modified to check for the most recently added privilege.
-func checkForCloudControllerPrivileges(ctx context.Context, runtime *config.ControlRuntime, timeout time.Duration) error {
-	return util.WaitForRBACReady(ctx, runtime.KubeConfigSupervisor, timeout, authorizationv1.ResourceAttributes{
-		Namespace: metav1.NamespaceSystem,
-		Verb:      "watch",
-		Resource:  "endpointslices",
-		Group:     "discovery.k8s.io",
-	}, version.Program+"-cloud-controller-manager")
+func checkForCloudControllerPrivileges(ctx context.Context, runtime *config.ControlRuntime) error {
+	ras := []authorizationv1.ResourceAttributes{
+		{
+			Namespace: metav1.NamespaceSystem,
+			Verb:      "get",
+			Resource:  "configmaps",
+			Name:      "extension-apiserver-authentication",
+		},
+		{
+			Namespace: metav1.NamespaceSystem,
+			Verb:      "watch",
+			Resource:  "endpointslices",
+			Group:     "discovery.k8s.io",
+		},
+	}
+	for _, ra := range ras {
+		if err := util.WaitForRBACReady(ctx, runtime.KubeConfigSupervisor, util.DefaultAPIServerReadyTimeout, ra, version.Program+"-cloud-controller-manager"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func waitForAPIServerHandlers(ctx context.Context, runtime *config.ControlRuntime) {
@@ -442,15 +451,6 @@ func waitForAPIServerHandlers(ctx context.Context, runtime *config.ControlRuntim
 	runtime.APIServer = handler
 }
 
-func promise(f func() error) <-chan error {
-	c := make(chan error, 1)
-	go func() {
-		c <- f()
-		close(c)
-	}()
-	return c
-}
-
 // waitForUntaintedNode watches nodes, waiting to find one not tainted as
 // uninitialized by the external cloud provider.
 func waitForUntaintedNode(ctx context.Context, kubeConfig string) error {
@@ -459,16 +459,7 @@ func waitForUntaintedNode(ctx context.Context, kubeConfig string) error {
 		return err
 	}
 
-	lw := toolscache.NewListWatchFromClient(client.CoreV1().RESTClient(), "nodes", metav1.NamespaceNone, fields.Everything())
-
-	condition := func(ev watch.Event) (bool, error) {
-		if node, ok := ev.Object.(*v1.Node); ok {
-			return getCloudTaint(node.Spec.Taints) == nil, nil
-		}
-		return false, errors.New("event object not of type v1.Node")
-	}
-
-	if _, err := toolswatch.UntilWithSync(ctx, lw, &v1.Node{}, nil, condition); err != nil {
+	if err := util.WaitForNode(ctx, client, "", func(node *v1.Node) (bool, error) { return getCloudTaint(node.Spec.Taints) == nil, nil }); err != nil {
 		return errors.WithMessage(err, "failed to wait for untainted node")
 	}
 	return nil
