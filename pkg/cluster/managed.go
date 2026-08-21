@@ -10,13 +10,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
 	"github.com/k3s-io/k3s/pkg/etcd"
 	"github.com/k3s-io/k3s/pkg/nodepassword"
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/mux"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,7 +26,7 @@ import (
 
 // start starts the database, unless a cluster reset has been requested, in which case
 // it does that instead.
-func (c *Cluster) start(ctx context.Context) error {
+func (c *Cluster) start(ctx context.Context, wg *sync.WaitGroup) error {
 	if c.managedDB == nil {
 		return nil
 	}
@@ -41,12 +42,12 @@ func (c *Cluster) start(ctx context.Context) error {
 	if c.config.ClusterReset {
 		// If we're restoring from a snapshot, don't check the reset-flag - just reset and restore.
 		if c.config.ClusterResetRestorePath != "" {
-			return c.managedDB.Reset(ctx, rebootstrap)
+			return c.managedDB.Reset(ctx, wg, rebootstrap)
 		}
 
 		// If the reset-flag doesn't exist, reset. This will create the reset-flag if it succeeds.
 		if !resetDone {
-			return c.managedDB.Reset(ctx, rebootstrap)
+			return c.managedDB.Reset(ctx, wg, rebootstrap)
 		}
 
 		// The reset-flag exists, ask the user to remove it if they want to reset again.
@@ -61,7 +62,7 @@ func (c *Cluster) start(ctx context.Context) error {
 	}
 
 	// Starting the managed database will clear the reset-flag if set
-	return c.managedDB.Start(ctx, c.clientAccessInfo)
+	return c.managedDB.Start(ctx, wg, c.clientAccessInfo)
 }
 
 // registerDBHandlers registers managed-datastore-specific callbacks, and installs additional HTTP route handlers.
@@ -132,8 +133,7 @@ func (c *Cluster) setupEtcdProxy(ctx context.Context, etcdProxy etcd.Proxy) {
 // deleteNodePasswdSecret wipes out the node password secret after restoration
 func (c *Cluster) deleteNodePasswdSecret(ctx context.Context) {
 	nodeName := os.Getenv("NODE_NAME")
-	secretsClient := c.config.Runtime.Core.Core().V1().Secret()
-	if err := nodepassword.Delete(secretsClient, nodeName); err != nil {
+	if err := nodepassword.Delete(nodeName); err != nil {
 		if apierrors.IsNotFound(err) {
 			logrus.Debugf("Node password secret is not found for node %s", nodeName)
 			return
@@ -144,10 +144,10 @@ func (c *Cluster) deleteNodePasswdSecret(ctx context.Context) {
 
 // handlerNoEtcd wraps a handler with an error message indicating that etcd is not deployed.
 func handlerNoEtcd(handler http.Handler) http.Handler {
-	r := mux.NewRouter().SkipClean(true)
+	r := mux.NewRouter()
 
 	// Wildcard route for anything after /db/
-	r.HandleFunc("/db/{_:.*}", func(resp http.ResponseWriter, r *http.Request) {
+	r.HandleFunc("/db/", func(resp http.ResponseWriter, r *http.Request) {
 		util.SendError(errors.New("etcd datastore disabled"), resp, r, http.StatusBadRequest)
 	})
 
