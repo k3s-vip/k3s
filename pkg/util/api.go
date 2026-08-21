@@ -14,6 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	v1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -46,6 +47,27 @@ func GetAddresses(endpoint *v1.Endpoints) []string {
 		}
 		for _, address := range subset.Addresses {
 			serverAddresses = append(serverAddresses, net.JoinHostPort(address.IP, port))
+		}
+	}
+	return serverAddresses
+}
+
+func GetAddressesFromSlices(slices ...discoveryv1.EndpointSlice) []string {
+	serverAddresses := []string{}
+	for _, slice := range slices {
+		var port string
+		if len(slice.Ports) > 0 && slice.Ports[0].Port != nil {
+			port = strconv.Itoa(int(*slice.Ports[0].Port))
+		}
+		if port == "" {
+			port = "443"
+		}
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready {
+				for _, address := range endpoint.Addresses {
+					serverAddresses = append(serverAddresses, net.JoinHostPort(address, port))
+				}
+			}
 		}
 	}
 	return serverAddresses
@@ -84,7 +106,7 @@ func WaitForAPIServerReady(ctx context.Context, kubeconfigPath string, timeout t
 
 	err = wait.PollUntilContextTimeout(ctx, time.Second*2, timeout, true, func(ctx context.Context) (bool, error) {
 		// DoRaw returns an error if the response code is < 200 OK or > 206 Partial Content
-		if _, err := restClient.Get().AbsPath("/readyz").Param("verbose", "").DoRaw(ctx); err != nil {
+		if _, err := restClient.Get().AbsPath("/readyz").Param("verbose", "true").Param("exclude", "kms-providers").DoRaw(ctx); err != nil {
 			if err.Error() != lastErr.Error() {
 				logrus.Infof("Polling for API server readiness: GET /readyz failed: %v", err)
 			} else {
@@ -227,9 +249,9 @@ func subjectAccessReview(authClient *authorizationv1client.AuthorizationV1Client
 	}
 }
 
-func BuildControllerEventRecorder(k8s clientset.Interface, controllerName, namespace string) record.EventRecorder {
+func BuildControllerEventRecorder(ctx context.Context, k8s clientset.Interface, controllerName, namespace string) record.EventRecorder {
 	logrus.Infof("Creating %s event broadcaster", controllerName)
-	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster := record.NewBroadcaster(record.WithContext(ctx))
 	eventBroadcaster.StartStructuredLogging(0)
 	eventBroadcaster.StartRecordingToSink(&coregetter.EventSinkImpl{Interface: k8s.CoreV1().Events(namespace)})
 	nodeName := os.Getenv("NODE_NAME")
