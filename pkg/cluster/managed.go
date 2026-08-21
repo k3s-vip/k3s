@@ -18,10 +18,10 @@ import (
 	"github.com/k3s-io/k3s/pkg/nodepassword"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/mux"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // start starts the database, unless a cluster reset has been requested, in which case
@@ -84,7 +84,7 @@ func (c *Cluster) registerDBHandlers(handler http.Handler) (http.Handler, error)
 func (c *Cluster) assignManagedDriver(ctx context.Context) error {
 	// Check all managed drivers for an initialized database on disk; use one if found
 	for _, driver := range managed.Registered() {
-		if err := driver.SetControlConfig(c.config); err != nil {
+		if err := driver.SetControlConfig(ctx, c.config); err != nil {
 			return err
 		}
 		if ok, err := driver.IsInitialized(); err != nil {
