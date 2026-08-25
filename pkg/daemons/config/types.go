@@ -121,6 +121,7 @@ type Agent struct {
 	ClusterDomain           string
 	ResolvConf              string
 	RootDir                 string
+	KubeletConfig           string
 	KubeletConfigDir        string
 	KubeConfigKubelet       string
 	KubeConfigKubeProxy     string
@@ -207,6 +208,7 @@ type Control struct {
 	KubeConfigOutput         string
 	KubeConfigMode           string
 	KubeConfigGroup          string
+	KubeConfigName           string
 	HelmJobImage             string
 	DataDir                  string
 	KineTLS                  bool

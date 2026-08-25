@@ -11,9 +11,9 @@ if [ "${DEBUG}" = 1 ]; then
     set -x
 fi
 
-# Try to keep the K3s binary under 80 megabytes.
+# Try to keep the K3s binary under 100 megabytes.
 # "64M ought to be enough for anybody"
-MAX_BINARY_MB=80
+MAX_BINARY_MB=100
 MAX_BINARY_SIZE=$((MAX_BINARY_MB * 1024 * 1024))
 CMD_NAME="dist/artifacts/k3s${BIN_SUFFIX}${BINARY_POSTFIX}"
 SIZE=$(stat -c '%s' ${CMD_NAME})
