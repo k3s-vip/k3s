@@ -79,7 +79,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	}
 
 	klog.EnableContextualLogging(true)
-	ctx := logger.NewContext(signals.SetupSignalContext(), version.Program)
+	ctx := logger.NewContext(signals.SetupSignalContext(), "server")
 	wg := &sync.WaitGroup{}
 
 	// If exiting due to an error, ensure that contexts are cancelled so that the
@@ -157,6 +157,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	serverConfig.ControlConfig.KubeConfigOutput = cfg.KubeConfigOutput
 	serverConfig.ControlConfig.KubeConfigMode = cfg.KubeConfigMode
 	serverConfig.ControlConfig.KubeConfigGroup = cfg.KubeConfigGroup
+	serverConfig.ControlConfig.KubeConfigName = cfg.KubeConfigName
 	serverConfig.ControlConfig.HelmJobImage = cfg.HelmJobImage
 	serverConfig.ControlConfig.Rootless = cfg.Rootless
 	serverConfig.ControlConfig.ServiceLBNamespace = cfg.ServiceLBNamespace
