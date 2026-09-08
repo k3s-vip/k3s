@@ -2,10 +2,12 @@ package cloudprovider
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
+	"sync"
 
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/rancher/wrangler/pkg/apply"
 	"github.com/rancher/wrangler/pkg/generated/controllers/apps"
@@ -48,6 +50,11 @@ type k3s struct {
 	nodeCache      coreclient.NodeCache
 	podCache       coreclient.PodCache
 	workqueue      workqueue.RateLimitingInterface
+
+	// nodeAddressMu guards nodeAddresses, which tracks the addresses last seen for each node,
+	// keyed by node name. This is used to detect changes to addresses used by LoadBalancer status.
+	nodeAddressMu sync.Mutex
+	nodeAddresses map[string]string
 }
 
 var _ cloudprovider.Interface = &k3s{}
@@ -74,7 +81,7 @@ func init() {
 		}
 
 		if !k.LBEnabled && !k.NodeEnabled {
-			return nil, fmt.Errorf("all cloud-provider functionality disabled by config")
+			return nil, errors.New("all cloud-provider functionality disabled by config")
 		}
 
 		return &k, err
@@ -82,13 +89,13 @@ func init() {
 }
 
 func (k *k3s) Initialize(clientBuilder cloudprovider.ControllerClientBuilder, stop <-chan struct{}) {
-	ctx := wait.ContextForChannel(stop)
+	ctx := logger.NewContext(wait.ContextForChannel(stop), controllerName)
 	config := clientBuilder.ConfigOrDie(controllerName)
 	k.client = kubernetes.NewForConfigOrDie(config)
 
 	if k.LBEnabled {
 		// Wrangler controller and caches are only needed if the load balancer controller is enabled.
-		k.recorder = util.BuildControllerEventRecorder(k.client, controllerName, meta.NamespaceAll)
+		k.recorder = util.BuildControllerEventRecorder(ctx, k.client, controllerName, meta.NamespaceAll)
 		coreFactory := core.NewFactoryFromConfigOrDie(config)
 		k.nodeCache = coreFactory.Core().V1().Node().Cache()
 
@@ -105,6 +112,7 @@ func (k *k3s) Initialize(clientBuilder cloudprovider.ControllerClientBuilder, st
 		k.endpointsCache = lbDiscFactory.Discovery().V1().EndpointSlice().Cache()
 		k.podCache = lbCoreFactory.Core().V1().Pod().Cache()
 		k.workqueue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+		k.nodeAddresses = map[string]string{}
 
 		if err := k.Register(ctx, coreFactory.Core().V1().Node(), lbCoreFactory.Core().V1().Pod(), lbDiscFactory.Discovery().V1().EndpointSlice()); err != nil {
 			logrus.Panicf("failed to register %s handlers: %v", controllerName, err)

@@ -1,16 +1,13 @@
 //go:build windows
-// +build windows
 
 package permissions
 
 import (
-	"fmt"
-
-	pkgerrors "github.com/pkg/errors"
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	"golang.org/x/sys/windows"
 )
 
-// IsPrivileged returns an error if the the process is not running as a member of the BUILTIN\Administrators group.
+// IsPrivileged returns an error if the process is not running as a member of the BUILTIN\Administrators group.
 // Ref: https://github.com/kubernetes/kubernetes/pull/96616
 func IsPrivileged() error {
 	var sid *windows.SID
@@ -27,7 +24,7 @@ func IsPrivileged() error {
 		0, 0, 0, 0, 0, 0,
 		&sid)
 	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to create Windows SID")
+		return errors.WithMessage(err, "failed to create Windows SID")
 	}
 	defer windows.FreeSid(sid)
 
@@ -36,11 +33,11 @@ func IsPrivileged() error {
 
 	member, err := token.IsMember(sid)
 	if err != nil {
-		return pkgerrors.WithMessage(err, "failed to check group membership")
+		return errors.WithMessage(err, "failed to check group membership")
 	}
 
 	if !member {
-		return fmt.Errorf("not running as member of BUILTIN\\Administrators group")
+		return errors.New("not running as member of BUILTIN\\Administrators group")
 	}
 
 	return nil

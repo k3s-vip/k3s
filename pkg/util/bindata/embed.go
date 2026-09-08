@@ -3,8 +3,8 @@ package bindata
 import (
 	"embed"
 	"io/fs"
-	"path/filepath"
-	"sort"
+	"path"
+	"slices"
 	"strings"
 )
 
@@ -16,7 +16,7 @@ type Bindata struct {
 }
 
 func (b Bindata) Asset(name string) ([]byte, error) {
-	return b.FS.ReadFile(filepath.Join(b.Prefix, name))
+	return b.FS.ReadFile(path.Join(b.Prefix, name))
 }
 
 func (b Bindata) AssetNames() []string {
@@ -30,6 +30,6 @@ func (b Bindata) AssetNames() []string {
 		}
 		return nil
 	})
-	sort.Strings(assets)
+	slices.Sort(assets)
 	return assets
 }
