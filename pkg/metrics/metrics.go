@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 
-	"github.com/gorilla/mux"
 	"github.com/k3s-io/k3s/pkg/agent/https"
 	"github.com/k3s-io/k3s/pkg/agent/loadbalancer"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
-	"github.com/k3s-io/k3s/pkg/etcd"
+	"github.com/k3s-io/k3s/pkg/etcd/snapshotmetrics"
+	"github.com/k3s-io/k3s/pkg/util/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	lassometrics "github.com/rancher/lasso/pkg/metrics"
+	rdmetrics "github.com/rancher/remotedialer/metrics"
 	"k8s.io/component-base/metrics/legacyregistry"
 )
 
@@ -37,7 +38,9 @@ func init() {
 	// same for loadbalancer metrics
 	loadbalancer.MustRegister(DefaultRegisterer)
 	// and etcd snapshot metrics
-	etcd.MustRegister(DefaultRegisterer)
+	snapshotmetrics.MustRegister(DefaultRegisterer)
+	// and remotedialer metrics
+	rdmetrics.MustRegister(DefaultRegisterer)
 }
 
 // Config holds fields for the metrics listener

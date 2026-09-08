@@ -24,11 +24,7 @@ func (e *secretError) Error() string {
 }
 
 func (e *secretError) Is(target error) bool {
-	switch target {
-	case ErrNoConfigSecret:
-		return true
-	}
-	return false
+	return target == ErrNoConfigSecret
 }
 
 func errNoConfigSecret() error { return &secretError{} }
@@ -46,12 +42,14 @@ func (c *Controller) getConfigFromSecret(secretName string) (*config.EtcdS3, err
 	etcdS3 := &config.EtcdS3{
 		AccessKey:    string(secret.Data["etcd-s3-access-key"]),
 		Bucket:       string(secret.Data["etcd-s3-bucket"]),
+		BucketLookup: string(secret.Data["etcd-s3-bucket-lookup-type"]),
 		Endpoint:     defaultEtcdS3.Endpoint,
 		Folder:       string(secret.Data["etcd-s3-folder"]),
 		Proxy:        string(secret.Data["etcd-s3-proxy"]),
 		Region:       defaultEtcdS3.Region,
 		SecretKey:    string(secret.Data["etcd-s3-secret-key"]),
 		SessionToken: string(secret.Data["etcd-s3-session-token"]),
+		Retention:    defaultEtcdS3.Retention,
 		Timeout:      *defaultEtcdS3.Timeout.DeepCopy(),
 	}
 
@@ -71,6 +69,14 @@ func (c *Controller) getConfigFromSecret(secretName string) (*config.EtcdS3, err
 			logrus.Warnf("Failed to parse etcd-s3-timeout value from S3 config secret %s: %v", secretName, err)
 		} else {
 			etcdS3.Timeout.Duration = duration
+		}
+	}
+
+	if v, ok := secret.Data["etcd-s3-retention"]; ok {
+		if retention, err := strconv.Atoi(string(v)); err != nil {
+			logrus.Warnf("Failed to parse etcd-s3-retention value from S3 config secret %s: %v", secretName, err)
+		} else {
+			etcdS3.Retention = retention
 		}
 	}
 
