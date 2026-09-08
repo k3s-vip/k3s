@@ -1,5 +1,4 @@
 //go:build !no_stage
-// +build !no_stage
 
 package deploy
 
@@ -11,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/k3s-io/k3s/pkg/util/bindata"
-	pkgerrors "github.com/pkg/errors"
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -27,7 +26,8 @@ staging:
 		if skips[name] || skips[nameNoExtension] {
 			continue staging
 		}
-		namePath := strings.Split(name, string(os.PathSeparator))
+		// nb: embed always uses forward slash as a path separator
+		namePath := strings.Split(name, "/")
 		for i := 1; i < len(namePath); i++ {
 			subPath := filepath.Join(namePath[0:i]...)
 			if skips[subPath] {
@@ -46,7 +46,7 @@ staging:
 		os.MkdirAll(filepath.Dir(p), 0700)
 		logrus.Info("Writing manifest: ", p)
 		if err := os.WriteFile(p, content, 0600); err != nil {
-			return pkgerrors.WithMessagef(err, "failed to write to %s", name)
+			return errors.WithMessagef(err, "failed to write to %s", name)
 		}
 	}
 

@@ -23,16 +23,15 @@ type HostConfigs map[string]templates.HostConfig
 
 // writeContainerdConfig renders and saves config.toml from the filled template
 func writeContainerdConfig(cfg *config.Node, containerdConfig templates.ContainerdConfig) error {
-	var containerdTemplate string
+	containerdTemplate := templates.ContainerdConfigTemplate
 	containerdTemplateBytes, err := os.ReadFile(cfg.Containerd.Template)
 	if err == nil {
 		logrus.Infof("Using containerd template at %s", cfg.Containerd.Template)
 		containerdTemplate = string(containerdTemplateBytes)
-	} else if os.IsNotExist(err) {
-		containerdTemplate = templates.ContainerdConfigTemplate
-	} else {
+	} else if !os.IsNotExist(err) {
 		return err
 	}
+
 	parsedTemplate, err := templates.ParseTemplateFromConfig(containerdTemplate, containerdConfig)
 	if err != nil {
 		return err
@@ -133,17 +132,17 @@ func getHostConfigs(registry *registries.Registry, noDefaultEndpoint bool, mirro
 		// create the default config, if it wasn't explicitly mentioned in the config section
 		config, ok := hosts[host]
 		if !ok {
-			if c, err := defaultHostConfig(host, mirrorAddr, configForHost(registry.Configs, host)); err != nil {
+			c, err := defaultHostConfig(host, mirrorAddr, configForHost(registry.Configs, host))
+			if err != nil {
 				logrus.Errorf("Failed to generate config for registry %s: %v", host, err)
 				continue
-			} else {
-				if noDefaultEndpoint {
-					c.Default = nil
-				} else if host == "*" {
-					c.Default = &templates.RegistryEndpoint{URL: &url.URL{}}
-				}
-				config = *c
 			}
+			if noDefaultEndpoint {
+				c.Default = nil
+			} else if host == "*" {
+				c.Default = &templates.RegistryEndpoint{URL: &url.URL{}}
+			}
+			config = *c
 		}
 
 		// track which endpoints we've already seen to avoid creating duplicates

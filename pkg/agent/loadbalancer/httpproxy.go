@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/k3s/pkg/version"
-	http_dialer "github.com/mwitkow/go-http-dialer"
-	pkgerrors "github.com/pkg/errors"
+	httpdialer "github.com/mwitkow/go-http-dialer"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/http/httpproxy"
 	"golang.org/x/net/proxy"
@@ -32,14 +32,14 @@ func SetHTTPProxy(address string) error {
 
 	serverURL, err := url.Parse(address)
 	if err != nil {
-		return pkgerrors.WithMessagef(err, "failed to parse address %s", address)
+		return errors.WithMessagef(err, "failed to parse address %s", address)
 	}
 
 	// Call this directly instead of using the cached environment used by http.ProxyFromEnvironment to allow for testing
 	proxyFromEnvironment := httpproxy.FromEnvironment().ProxyFunc()
 	proxyURL, err := proxyFromEnvironment(serverURL)
 	if err != nil {
-		return pkgerrors.WithMessagef(err, "failed to get proxy for address %s", address)
+		return errors.WithMessagef(err, "failed to get proxy for address %s", address)
 	}
 	if proxyURL == nil {
 		logrus.Debug(version.ProgramUpper + "_AGENT_HTTP_PROXY_ALLOWED is true but no proxy is configured for URL " + serverURL.String())
@@ -48,7 +48,7 @@ func SetHTTPProxy(address string) error {
 
 	dialer, err := proxyDialer(proxyURL, defaultDialer)
 	if err != nil {
-		return pkgerrors.WithMessagef(err, "failed to create proxy dialer for %s", proxyURL)
+		return errors.WithMessagef(err, "failed to create proxy dialer for %s", proxyURL)
 	}
 
 	defaultDialer = dialer
@@ -60,7 +60,7 @@ func SetHTTPProxy(address string) error {
 func proxyDialer(proxyURL *url.URL, forward proxy.Dialer) (proxy.Dialer, error) {
 	if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
 		// Create a new HTTP proxy dialer
-		httpProxyDialer := http_dialer.New(proxyURL, http_dialer.WithConnectionTimeout(10*time.Second), http_dialer.WithDialer(forward.(*net.Dialer)))
+		httpProxyDialer := httpdialer.New(proxyURL, httpdialer.WithConnectionTimeout(10*time.Second), httpdialer.WithDialer(forward.(*net.Dialer)))
 		return httpProxyDialer, nil
 	} else if proxyURL.Scheme == "socks5" {
 		// For SOCKS5 proxies, use the proxy package's FromURL
