@@ -39,7 +39,7 @@ func SendError(err error, resp http.ResponseWriter, req *http.Request, status ..
 	}
 
 	// Don't log "apiserver not ready" or "apiserver disabled" errors, they are frequent during startup
-	if !errors.Is(err, ErrAPINotReady) && !errors.Is(err, ErrAPIDisabled) {
+	if !errors.Is(err, ErrAPINotReady) && !errors.Is(err, ErrAPIDisabled) && !errors.Is(err, ErrCoreNotReady) {
 		logrus.Errorf("Sending %s %d response to %s: %v", req.Proto, code, req.RemoteAddr, err)
 	}
 
