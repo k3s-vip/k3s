@@ -1,10 +1,8 @@
 //go:build !windows
-// +build !windows
 
 package rootless
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -13,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
-	pkgerrors "github.com/pkg/errors"
 	"github.com/rootless-containers/rootlesskit/pkg/child"
 	"github.com/rootless-containers/rootlesskit/pkg/copyup/tmpfssymlink"
 	"github.com/rootless-containers/rootlesskit/pkg/network/slirp4netns"
@@ -81,6 +79,8 @@ func Rootless(stateDir string, enableIPv6 bool) error {
 	if err := parent.Parent(*parentOpt); err != nil {
 		logrus.Fatal(err)
 	}
+
+	//revive:disable-next-line:deep-exit
 	os.Exit(0)
 
 	return nil
@@ -132,7 +132,7 @@ func parseCIDR(s string) (*net.IPNet, error) {
 
 func createParentOpt(driver portDriver, stateDir string, enableIPv6 bool) (*parent.Opt, error) {
 	if err := os.MkdirAll(stateDir, 0755); err != nil {
-		return nil, pkgerrors.WithMessagef(err, "failed to mkdir %s", stateDir)
+		return nil, errors.WithMessagef(err, "failed to mkdir %s", stateDir)
 	}
 
 	driver.SetStateDir(stateDir)

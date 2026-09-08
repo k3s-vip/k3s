@@ -3,8 +3,9 @@ package cloudprovider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +15,6 @@ import (
 	"github.com/rancher/wrangler/pkg/condition"
 	coreclient "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
 	discoveryclient "github.com/rancher/wrangler/pkg/generated/controllers/discovery/v1"
-	"github.com/rancher/wrangler/pkg/merr"
 	"github.com/rancher/wrangler/pkg/objectset"
 	"github.com/sirupsen/logrus"
 	apps "k8s.io/api/apps/v1"
@@ -37,15 +37,16 @@ import (
 )
 
 var (
-	finalizerName          = "svccontroller." + version.Program + ".cattle.io/daemonset"
-	svcNameLabel           = "svccontroller." + version.Program + ".cattle.io/svcname"
-	svcNamespaceLabel      = "svccontroller." + version.Program + ".cattle.io/svcnamespace"
-	daemonsetNodeLabel     = "svccontroller." + version.Program + ".cattle.io/enablelb"
-	daemonsetNodePoolLabel = "svccontroller." + version.Program + ".cattle.io/lbpool"
-	nodeSelectorLabel      = "svccontroller." + version.Program + ".cattle.io/nodeselector"
-	priorityAnnotation     = "svccontroller." + version.Program + ".cattle.io/priorityclassname"
-	tolerationsAnnotation  = "svccontroller." + version.Program + ".cattle.io/tolerations"
-	controllerName         = names.ServiceLBController
+	finalizerName           = "svccontroller." + version.Program + ".cattle.io/daemonset"
+	svcNameLabel            = "svccontroller." + version.Program + ".cattle.io/svcname"
+	svcNamespaceLabel       = "svccontroller." + version.Program + ".cattle.io/svcnamespace"
+	daemonsetNodeLabel      = "svccontroller." + version.Program + ".cattle.io/enablelb"
+	daemonsetNodePoolLabel  = "svccontroller." + version.Program + ".cattle.io/lbpool"
+	daemonsetNodePoolPrefix = "lbpool.svccontroller." + version.Program + ".cattle.io/"
+	nodeSelectorLabel       = "svccontroller." + version.Program + ".cattle.io/nodeselector"
+	priorityAnnotation      = "svccontroller." + version.Program + ".cattle.io/priorityclassname"
+	tolerationsAnnotation   = "svccontroller." + version.Program + ".cattle.io/tolerations"
+	controllerName          = names.ServiceLBController
 )
 
 const (
@@ -55,7 +56,7 @@ const (
 )
 
 var (
-	DefaultLBImage = "rancher/klipper-lb:v0.4.13"
+	DefaultLBImage = "rancher/klipper-lb:v0.4.17"
 )
 
 func (k *k3s) Register(ctx context.Context,
@@ -141,21 +142,91 @@ func (k *k3s) onChangePod(key string, pod *core.Pod) (*core.Pod, error) {
 	return pod, nil
 }
 
-// onChangeNode handles changes to Nodes. We need to handle this as we may need to kick the DaemonSet
-// to add or remove pods from nodes if labels have changed.
+// onChangeNode handles changes to Nodes. We may need to update the status of Services with pods on
+// this node if the node addresses used for LoadBalancer ingress have changed, and to re-evaluate the
+// ServiceLB DaemonSets if the node gained or lost daemonsetNodeLabel (including a labeled node being
+// deleted, which is one of the cases that turns the DaemonSet NodeSelector back off - that
+// NodeSelector is not managed by the apply that deploys the DaemonSets, so nothing else clears it).
 func (k *k3s) onChangeNode(key string, node *core.Node) (*core.Node, error) {
-	if node == nil {
-		return nil, nil
-	}
-	if _, ok := node.Labels[daemonsetNodeLabel]; !ok {
-		return node, nil
+	addrChanged, labelChanged := k.updateNodeState(key, node)
+
+	if addrChanged {
+		if err := k.enqueueNodeServices(key); err != nil {
+			return node, err
+		}
 	}
 
-	if err := k.updateDaemonSets(); err != nil {
-		return node, err
+	if labelChanged {
+		if err := k.updateDaemonSets(); err != nil {
+			return node, err
+		}
 	}
 
 	return node, nil
+}
+
+// updateNodeState records the current tracked state for a node under a single lock, returning
+// whether the node addresses used by LoadBalancer status changed, and whether the node's
+// daemonsetNodeLabel presence changed, since the last event. A node that is gone (node == nil) or
+// being deleted (DeletionTimestamp set) is treated as deleted and its entry is removed - there is no
+// point waiting for the final deletion event once we know it is going away; a previously-labeled node
+// going away counts as a label change so the DaemonSets can drop their NodeSelector.
+func (k *k3s) updateNodeState(key string, node *core.Node) (addrChanged, labelChanged bool) {
+	k.nodeStateMu.Lock()
+	defer k.nodeStateMu.Unlock()
+
+	prev, existed := k.nodeStates[key]
+	if node == nil || node.DeletionTimestamp != nil {
+		delete(k.nodeStates, key)
+		return false, existed && prev.hasSelectorLabel
+	}
+
+	_, hasLabel := node.Labels[daemonsetNodeLabel]
+	cur := nodeState{addresses: lbNodeAddresses(node), hasSelectorLabel: hasLabel}
+	k.nodeStates[key] = cur
+	if !existed {
+		// First time seeing this node: sync status, and evaluate the selector if it is labeled.
+		return true, hasLabel
+	}
+	return prev.addresses != cur.addresses, prev.hasSelectorLabel != cur.hasSelectorLabel
+}
+
+// enqueueNodeServices enqueues a status update for all Services with ServiceLB pods on the named
+// node. The addresses of the node hosting a pod are used as the LoadBalancer ingress IPs, so the
+// status of these Services must be re-checked when the node addresses change.
+func (k *k3s) enqueueNodeServices(nodeName string) error {
+	pods, err := k.podCache.List(k.LBNamespace, labels.Everything())
+	if err != nil {
+		return err
+	}
+
+	for _, pod := range pods {
+		if pod.Spec.NodeName != nodeName {
+			continue
+		}
+		serviceName := pod.Labels[svcNameLabel]
+		serviceNamespace := pod.Labels[svcNamespaceLabel]
+		if serviceName == "" || serviceNamespace == "" {
+			continue
+		}
+		k.workqueue.Add(serviceNamespace + "/" + serviceName)
+	}
+
+	return nil
+}
+
+// lbNodeAddresses returns a stable representation of the node addresses used to populate
+// LoadBalancer status, so that changes to them can be detected. Addresses that are not used
+// by the load balancer, such as the node hostname, are ignored.
+func lbNodeAddresses(node *core.Node) string {
+	addresses := make([]string, 0, len(node.Status.Addresses))
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == core.NodeExternalIP || addr.Type == core.NodeInternalIP {
+			addresses = append(addresses, string(addr.Type)+"="+addr.Address)
+		}
+	}
+	slices.Sort(addresses)
+	return strings.Join(addresses, ",")
 }
 
 // onChangeEndpointSlice handles changes to EndpointSlices. This is used to ensure that LoadBalancer
@@ -223,7 +294,6 @@ func (k *k3s) processSingleItem(obj any) error {
 
 	k.workqueue.Forget(obj)
 	return nil
-
 }
 
 // updateServiceStatus updates the load balancer status for the matching service, if it exists and is a
@@ -390,8 +460,8 @@ func filterByIPFamily(ips []string, svc *core.Service) ([]string, error) {
 		}
 	}
 
-	sort.Strings(ipv4Addresses)
-	sort.Strings(ipv6Addresses)
+	slices.Sort(ipv4Addresses)
+	slices.Sort(ipv6Addresses)
 
 	for _, ipFamily := range svc.Spec.IPFamilies {
 		switch ipFamily {
@@ -491,11 +561,6 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 					SecurityContext:              securityContext,
 					Tolerations: []core.Toleration{
 						{
-							Key:      util.MasterRoleLabelKey,
-							Operator: "Exists",
-							Effect:   "NoSchedule",
-						},
-						{
 							Key:      util.ControlPlaneRoleLabelKey,
 							Operator: "Exists",
 							Effect:   "NoSchedule",
@@ -593,12 +658,11 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 		ds.Spec.Template.Spec.NodeSelector = map[string]string{
 			daemonsetNodeLabel: "true",
 		}
-		// Add node selector for "svccontroller.k3s.cattle.io/lbpool=<pool>" if service has lbpool label
-		if svc.Labels[daemonsetNodePoolLabel] != "" {
-			ds.Spec.Template.Spec.NodeSelector[daemonsetNodePoolLabel] = svc.Labels[daemonsetNodePoolLabel]
-		}
 		ds.Labels[nodeSelectorLabel] = "true"
 	}
+
+	// Restrict the DaemonSet to nodes in the pool named by the service's lbpool label, if set.
+	ds.Spec.Template.Spec.Affinity = nodePoolAffinity(svc.Labels[daemonsetNodePoolLabel])
 
 	// Fetch tolerations from the "svccontroller.k3s.cattle.io/tolerations" annotation on the service
 	// and append them to the DaemonSet's pod tolerations.
@@ -609,6 +673,39 @@ func (k *k3s) newDaemonSet(svc *core.Service) (*apps.DaemonSet, error) {
 	ds.Spec.Template.Spec.Tolerations = append(ds.Spec.Template.Spec.Tolerations, tolerations...)
 
 	return ds, nil
+}
+
+// nodePoolAffinity returns node affinity restricting pods to nodes belonging to the named pool,
+// or nil if no pool is named. A node is considered part of the pool if it is labeled with either
+// "svccontroller.k3s.cattle.io/lbpool=<pool>" or "lbpool.svccontroller.k3s.cattle.io/<pool>=true".
+// The two forms are listed as separate node selector terms, which are ORed by the scheduler, so
+// that nodes using the older single-pool label are still selected.
+func nodePoolAffinity(pool string) *core.Affinity {
+	if pool == "" {
+		return nil
+	}
+	return &core.Affinity{
+		NodeAffinity: &core.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &core.NodeSelector{
+				NodeSelectorTerms: []core.NodeSelectorTerm{
+					{
+						MatchExpressions: []core.NodeSelectorRequirement{{
+							Key:      daemonsetNodePoolLabel,
+							Operator: core.NodeSelectorOpIn,
+							Values:   []string{pool},
+						}},
+					},
+					{
+						MatchExpressions: []core.NodeSelectorRequirement{{
+							Key:      daemonsetNodePoolPrefix + pool,
+							Operator: core.NodeSelectorOpIn,
+							Values:   []string{"true"},
+						}},
+					},
+				},
+			},
+		},
+	}
 }
 
 // updateDaemonSets ensures that our DaemonSets have a NodeSelector present if one is enabled,
@@ -627,12 +724,14 @@ func (k *k3s) updateDaemonSets() error {
 	}
 
 	for _, ds := range daemonsets {
-		ds.Labels[nodeSelectorLabel] = fmt.Sprintf("%t", enableNodeSelector)
-		ds.Spec.Template.Spec.NodeSelector = map[string]string{}
+		// The cache returns pointers into the shared informer store, so copy before mutating.
+		updated := ds.DeepCopy()
+		updated.Labels[nodeSelectorLabel] = fmt.Sprintf("%t", enableNodeSelector)
+		updated.Spec.Template.Spec.NodeSelector = map[string]string{}
 		if enableNodeSelector {
-			ds.Spec.Template.Spec.NodeSelector[daemonsetNodeLabel] = "true"
+			updated.Spec.Template.Spec.NodeSelector[daemonsetNodeLabel] = "true"
 		}
-		if _, err := k.client.AppsV1().DaemonSets(ds.Namespace).Update(context.TODO(), ds, meta.UpdateOptions{}); err != nil {
+		if _, err := k.client.AppsV1().DaemonSets(updated.Namespace).Update(context.TODO(), updated, meta.UpdateOptions{}); err != nil {
 			return err
 		}
 	}
@@ -665,7 +764,7 @@ func (k *k3s) removeServiceFinalizers(ctx context.Context) error {
 		return err
 	}
 
-	var errs merr.Errors
+	var errs []error
 	for _, svc := range services.Items {
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			s, err := k.removeFinalizer(ctx, &svc)
@@ -676,10 +775,7 @@ func (k *k3s) removeServiceFinalizers(ctx context.Context) error {
 		}
 	}
 
-	if len(errs) > 0 {
-		return errs
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // removeFinalizer ensures that there is not a finalizer for this controller on the Service
@@ -741,11 +837,11 @@ func validateToleration(toleration *core.Toleration) error {
 	}
 
 	if toleration.Key == "" && toleration.Operator != core.TolerationOpExists {
-		return fmt.Errorf("toleration with empty key must have operator 'Exists'")
+		return errors.New("toleration with empty key must have operator 'Exists'")
 	}
 
 	if toleration.Operator == core.TolerationOpExists && toleration.Value != "" {
-		return fmt.Errorf("toleration with operator 'Exists' must have an empty value")
+		return errors.New("toleration with operator 'Exists' must have an empty value")
 	}
 
 	return nil
