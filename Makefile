@@ -1,10 +1,20 @@
+TARGETS := $(shell ls scripts | grep -v \\.sh)
 GO_FILES ?= $$(find . -name '*.go')
 SHELL := /bin/bash
 
 
+.dapper:
+	@echo Downloading dapper
+	@curl -fsSL https://github.com/rancher-archives/dapper/releases/download/v0.6.0/dapper-$$(uname -s)-$$(uname -m) >.dapper
+	@@chmod a+x .dapper
+	@./.dapper -v
+
 .PHONY: docker.sock
 docker.sock:
 	while ! docker version 1>/dev/null; do sleep 1; done
+
+$(TARGETS): .dapper docker.sock
+	./.dapper $@
 
 .PHONY: deps
 deps:
@@ -28,18 +38,6 @@ image-scan:
 format:
 	gofmt -s -l -w $(GO_FILES)
 	goimports -w $(GO_FILES)
-
-.PHONY: tag-image-latest
-tag-image-latest:
-	scripts/tag-image-latest
-
-.PHONY: validate
-validate:
-	docker buildx build \
-		--build-arg="SKIP_VALIDATE=$(SKIP_VALIDATE)" \
-		--build-arg="DEBUG=$(DEBUG)" \
-		--progress=plain \
-		-f Dockerfile --target=validate .
 
 .PHONY: binary
 binary:
@@ -73,11 +71,3 @@ multiarch-binary:
 image: binary
 	@echo "INFO: Building K3s image..."
 	./scripts/package-image
-
-.PHONY: airgap
-airgap: 
-	@echo "INFO: Building K3s airgap tarball..."
-	./scripts/package-airgap
-
-.PHONY: ci
-ci:  binary image airgap

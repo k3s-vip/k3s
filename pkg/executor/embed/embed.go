@@ -150,6 +150,8 @@ func (e *Embedded) Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node,
 		klog.InitFlags(nil)
 		for {
 			flag.Set("v", strconv.Itoa(cmds.LogConfig.VLevel))
+			flag.Set("legacy_stderr_threshold_behavior", "false")
+			flag.Set("stderrthreshold", "INFO")
 
 			select {
 			case <-time.After(time.Second):
@@ -181,6 +183,7 @@ func (e *Embedded) Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node,
 			nodeConfig.Flannel.ConfFile = cfg.FlannelConf
 			nodeConfig.Flannel.ConfOverride = true
 		}
+		nodeConfig.Flannel.CNIConfFile = cfg.FlannelCniConfFile
 		nodeConfig.AgentConfig.CNIBinDir = filepath.Dir(hostLocal)
 		nodeConfig.AgentConfig.CNIConfDir = filepath.Join(cfg.DataDir, "agent", "etc", "cni", "net.d")
 
