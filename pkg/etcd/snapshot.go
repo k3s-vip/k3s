@@ -154,9 +154,8 @@ func (e *ETCD) compressSnapshot(snapshotDir, snapshotFilename string, mtime time
 
 // decompressSnapshot decompresses the given snapshot and provides the caller
 // with the full path to the uncompressed snapshot.
-func (e *ETCD) decompressSnapshot(snapshotDir, snapshotFilename string) (unzipPath string, err error) {
-	logrus.Info("Decompressing etcd snapshot file: " + snapshotFilename)
-	snapshotPath := filepath.Join(snapshotDir, snapshotFilename)
+func (e *ETCD) decompressSnapshot(snapshotPath string) (unzipPath string, err error) {
+	logrus.Info("Decompressing etcd snapshot file: " + filepath.Base(snapshotPath))
 	unzipPath = strings.TrimSuffix(snapshotPath, snapshot.CompressedExtension)
 
 	defer func() {
@@ -249,6 +248,11 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 	if status.IsLearner {
 		logrus.Warnf("Unable to take snapshot: not supported for learner")
 		return nil, nil
+	}
+	_, err = e.client.Defragment(ctx, endpoints[0])
+	if err != nil {
+		logrus.Warnf("Unable to defragment etcd: %v", err)
+		return nil, errors.WithMessage(err, "failed to defragment etcd for snapshot")
 	}
 
 	snapshotDir, err := snapshotDir(e.config, true)

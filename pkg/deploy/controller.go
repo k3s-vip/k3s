@@ -10,7 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +43,11 @@ const (
 	startKey       = "_start_"
 	gvkSep         = ";"
 )
+
+// epoch is the fixed mtime that some immutable filesystems (e.g. NixOS /nix/store)
+// pin all files to. Such files never register content changes via mtime, so they
+// must always be re-checked against the Addon checksum.
+var epoch = time.Unix(0, 0)
 
 // WatchFiles sets up an OnChange callback to start a periodic goroutine to watch files for changes once the controller has started up.
 func WatchFiles(ctx context.Context, client kubernetes.Interface, apply apply.Apply, addons controllersv1.AddonController, disables map[string]bool, bases ...string) error {
@@ -137,7 +142,7 @@ func (w *watcher) listFilesIn(base string, force bool) error {
 		keys[keyIndex] = path
 		keyIndex++
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	var errs []error
 	for _, path := range keys {
@@ -156,7 +161,7 @@ func (w *watcher) listFilesIn(base string, force bool) error {
 			continue
 		}
 		modTime := files[path].ModTime()
-		if !force && modTime.Equal(w.modTime[path]) {
+		if !force && !modTime.Equal(epoch) && modTime.Equal(w.modTime[path]) {
 			continue
 		}
 		if err := w.deploy(path, !force); err != nil {

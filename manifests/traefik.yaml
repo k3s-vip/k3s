@@ -21,10 +21,9 @@ spec:
   set:
     global.systemDefaultRegistry: "%{SYSTEM_DEFAULT_REGISTRY_RAW}%"
   valuesContent: |-
-    deployment:
-      podAnnotations:
-        prometheus.io/port: "8082"
-        prometheus.io/scrape: "true"
+    globalArguments:
+    - --global.checknewversion=false
+    - --global.sendanonymoususage=false
     providers:
       kubernetesIngress:
         publishedService:
@@ -42,3 +41,4 @@ spec:
     service:
       spec:
         ipFamilyPolicy: "PreferDualStack"
+        type: "ClusterIP"
