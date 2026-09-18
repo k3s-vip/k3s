@@ -82,6 +82,7 @@ state = {{ printf "%q" .NodeConfig.Containerd.State }}
 [plugins.'io.containerd.grpc.v1.cri'.containerd]
   default_runtime_name = {{ printf "%q" . }}
 {{ with $.NodeConfig.AgentConfig.Snapshotter }}
+
   snapshotter = {{ printf "%q" . }}
   disable_snapshot_annotations = {{ if or (eq . "stargz") (eq . "nix") }}false{{ else }}true{{ end }}
 {{ end }}
