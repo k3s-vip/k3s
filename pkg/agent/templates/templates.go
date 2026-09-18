@@ -89,7 +89,7 @@ state = {{ printf "%q" .NodeConfig.Containerd.State }}
   default_runtime_name = {{ printf "%q" . }}
 {{ end }}
 
-{{ with $.NodeConfig.AgentConfig.Snapshotter }}
+{{ with .NodeConfig.AgentConfig.Snapshotter }}
 [plugins.'io.containerd.cri.v1.images']
   snapshotter = {{ printf "%q" . }}
   disable_snapshot_annotations = {{ if or (eq . "stargz") (eq . "nix") }}false{{ else }}true{{ end }}
