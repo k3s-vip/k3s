@@ -78,11 +78,13 @@ state = {{ printf "%q" .NodeConfig.Containerd.State }}
   restrict_oom_score_adj = true
 {{ end }}
 
-{{ if or .NodeConfig.AgentConfig.Snapshotter .NodeConfig.DefaultRuntime }}
+{{ with .NodeConfig.DefaultRuntime }}
 [plugins.'io.containerd.grpc.v1.cri'.containerd]
+  default_runtime_name = {{ printf "%q" . }}
+{{ with $.NodeConfig.AgentConfig.Snapshotter }}
   snapshotter = {{ printf "%q" . }}
-  {{ with .NodeConfig.DefaultRuntime }}default_runtime_name = {{ printf "%q" . }}{{ end }}
   disable_snapshot_annotations = {{ if or (eq . "stargz") (eq . "nix") }}false{{ else }}true{{ end }}
+{{ end }}
 {{ end }}
 
 {{- if or .NodeConfig.AgentConfig.CNIBinDir .NodeConfig.AgentConfig.CNIConfDir }}
