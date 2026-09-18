@@ -84,7 +84,7 @@ state = {{ printf "%q" .NodeConfig.Containerd.State }}
 {{ end }}
 
 {{ with .NodeConfig.AgentConfig.PauseImage }}
-[plugins."io.containerd.grpc.v1.cri"]
+[plugins.'io.containerd.grpc.v1.cri']
   sandbox_image = {{ printf "%q" . }}
 {{ end }}
 
@@ -101,7 +101,7 @@ state = {{ printf "%q" .NodeConfig.Containerd.State }}
 {{ end }}
 
 {{ with .NodeConfig.DefaultRuntime }}
-[plugins."io.containerd.grpc.v1.cri".containerd]
+[plugins.'io.containerd.grpc.v1.cri'.containerd]
   default_runtime_name = {{ printf "%q" . }}
 {{ end }}
 
