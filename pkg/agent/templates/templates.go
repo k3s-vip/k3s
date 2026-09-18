@@ -64,6 +64,11 @@ state = {{ printf "%q" .NodeConfig.Containerd.State }}
   stream_server_address = "127.0.0.1"
   stream_server_port = "10010"
 
+{{ with .NodeConfig.AgentConfig.PauseImage }}
+[plugins.'io.containerd.cri.v1.images'.pinned_images]
+  sandbox = {{ printf "%q" . }}
+{{ end }}
+
 [plugins.'io.containerd.cri.v1.runtime']
   enable_selinux = {{ .NodeConfig.SELinux }}
   enable_unprivileged_ports = {{ .EnableUnprivileged }}
@@ -79,16 +84,16 @@ state = {{ printf "%q" .NodeConfig.Containerd.State }}
   restrict_oom_score_adj = true
 {{ end }}
 
+{{ with .NodeConfig.DefaultRuntime }}
+[plugins.'io.containerd.cri.v1.runtime'.containerd]
+  default_runtime_name = {{ printf "%q" . }}
+{{ end }}
+
 {{ with .NodeConfig.AgentConfig.Snapshotter }}
 [plugins.'io.containerd.cri.v1.images']
   snapshotter = {{ printf "%q" . }}
   disable_snapshot_annotations = {{ if or (eq . "stargz") (eq . "nix") }}false{{ else }}true{{ end }}
   use_local_image_pull = true
-{{ end }}
-
-{{ with .NodeConfig.AgentConfig.PauseImage }}
-[plugins.'io.containerd.cri.v1.images'.pinned_images]
-  sandbox = {{ printf "%q" . }}
 {{ end }}
 
 {{- if or .NodeConfig.AgentConfig.CNIBinDir .NodeConfig.AgentConfig.CNIConfDir }}
@@ -101,11 +106,6 @@ state = {{ printf "%q" .NodeConfig.Containerd.State }}
 [plugins.'io.containerd.service.v1.tasks-service']
   {{ with .NodeConfig.Containerd.BlockIOConfig }}blockio_config_file = {{ printf "%q" . }}{{ end }}
   {{ with .NodeConfig.Containerd.RDTConfig }}rdt_config_file = {{ printf "%q" . }}{{ end }}
-{{ end }}
-
-{{ with .NodeConfig.DefaultRuntime }}
-[plugins.'io.containerd.cri.v1.runtime'.containerd]
-  default_runtime_name = {{ printf "%q" . }}
 {{ end }}
 
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
