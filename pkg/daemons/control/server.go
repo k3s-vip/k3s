@@ -21,15 +21,9 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apimachinery/pkg/watch"
-	toolscache "k8s.io/client-go/tools/cache"
-	toolswatch "k8s.io/client-go/tools/watch"
 	cloudproviderapi "k8s.io/cloud-provider/api"
-	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
-	"k8s.io/kubernetes/pkg/registry/core/node"
+	node "k8s.io/kubernetes/pkg/proxy/util"
 
 	// for client metric registration
 	_ "k8s.io/component-base/metrics/prometheus/restclient"
@@ -38,7 +32,6 @@ import (
 // Prepare loads bootstrap data from the datastore and sets up the initial
 // tunnel server request handler and stub authenticator.
 func Prepare(ctx context.Context, wg *sync.WaitGroup, cfg *config.Control) error {
-	logsapi.ReapplyHandling = logsapi.ReapplyHandlingIgnoreUnchanged
 	if err := prepare(ctx, wg, cfg); err != nil {
 		return errors.WithMessage(err, "preparing server")
 	}
@@ -137,6 +130,7 @@ func controllerManager(ctx context.Context, cfg *config.Control) error {
 	}
 	if !cfg.DisableCCM {
 		argsMap["configure-cloud-routes"] = "false"
+		argsMap["controllers"] = argsMap["controllers"] + ",-service,-route,-cloud-node-lifecycle"
 	}
 
 	if cfg.VLevel != 0 {
@@ -452,16 +446,7 @@ func waitForUntaintedNode(ctx context.Context, kubeConfig string) error {
 		return err
 	}
 
-	lw := toolscache.NewListWatchFromClient(client.CoreV1().RESTClient(), "nodes", metav1.NamespaceNone, fields.Everything())
-
-	condition := func(ev watch.Event) (bool, error) {
-		if node, ok := ev.Object.(*v1.Node); ok {
-			return getCloudTaint(node.Spec.Taints) == nil, nil
-		}
-		return false, errors.New("event object not of type v1.Node")
-	}
-
-	if _, err := toolswatch.UntilWithSync(ctx, lw, &v1.Node{}, nil, condition); err != nil {
+	if err := util.WaitForNode(ctx, client, "", func(node *v1.Node) (bool, error) { return getCloudTaint(node.Spec.Taints) == nil, nil }); err != nil {
 		return errors.WithMessage(err, "failed to wait for untainted node")
 	}
 	return nil

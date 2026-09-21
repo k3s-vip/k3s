@@ -25,8 +25,7 @@ func Register(ctx context.Context,
 	// create a single-resource watch cache on the coredns configmap so that we
 	// don't have to retrieve it from the apiserver every time a node changes.
 	lw := toolscache.NewListWatchFromClient(coreClient.CoreV1().RESTClient(), "configmaps", metav1.NamespaceSystem, fields.OneTermEqualSelector(metav1.ObjectNameField, "coredns"))
-	informerOpts := toolscache.InformerOptions{ListerWatcher: lw, ObjectType: &corev1.ConfigMap{}, Handler: &toolscache.ResourceEventHandlerFuncs{}}
-	indexer, informer := toolscache.NewInformerWithOptions(informerOpts)
+	indexer, informer := toolscache.NewIndexerInformer(lw, &corev1.ConfigMap{}, 0, &toolscache.ResourceEventHandlerFuncs{}, toolscache.Indexers{})
 	go informer.Run(ctx.Done())
 
 	h := &handler{

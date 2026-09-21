@@ -31,7 +31,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	toolscache "k8s.io/client-go/tools/cache"
@@ -185,14 +184,8 @@ func (a *agentTunnel) startWatches(ctx context.Context, config *daemonconfig.Nod
 func (a *agentTunnel) setKubeletPort(ctx context.Context, rbacReady <-chan struct{}) {
 	<-rbacReady
 
-	wait.PollUntilContextTimeout(ctx, time.Second, util.DefaultAPIServerReadyTimeout, true, func(ctx context.Context) (bool, error) {
+	util.WaitForNode(ctx, a.client, os.Getenv("NODE_NAME"), func(node *v1.Node) (bool, error) {
 		var readyTime metav1.Time
-		nodeName := os.Getenv("NODE_NAME")
-		node, err := a.client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-		if err != nil {
-			logrus.Debugf("Tunnel authorizer failed to get Kubelet Port: %v", err)
-			return false, nil
-		}
 		for _, cond := range node.Status.Conditions {
 			if cond.Type == v1.NodeReady && cond.Status == v1.ConditionTrue {
 				readyTime = cond.LastHeartbeatTime
@@ -528,12 +521,7 @@ func wrapListWithRefresh(ctx context.Context, lw *toolscache.ListWatch, refreshF
 			go refreshFunc(ctx)
 			return lw.ListFunc(options)
 		},
-		ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
-			go refreshFunc(ctx)
-			return lw.ListWithContextFunc(ctx, options)
-		},
-		WatchFunc:            lw.WatchFunc,
-		WatchFuncWithContext: lw.WatchFuncWithContext,
+		WatchFunc: lw.WatchFunc,
 	}
 }
 
