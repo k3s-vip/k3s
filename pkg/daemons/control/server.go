@@ -16,6 +16,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -171,12 +172,13 @@ func scheduler(ctx context.Context, cfg *config.Control) error {
 
 	args := util.GetArgs(argsMap, cfg.ExtraSchedulerArgs)
 
-	nodeReady := make(chan struct{})
+	nodeReady := wait.New()
 
 	go func() {
-		defer close(nodeReady)
-
-		<-executor.APIServerReadyChan()
+		if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
+			nodeReady.MarkFailed(err)
+			return
+		}
 
 		// If we're running the embedded cloud controller, wait for it to untaint at least one
 		// node (usually, the local node) before starting the scheduler to ensure that it
@@ -185,9 +187,13 @@ func scheduler(ctx context.Context, cfg *config.Control) error {
 			logrus.Infof("Waiting for untainted node")
 			// this waits forever for an untainted node; if it returns ErrWaitTimeout the context has been cancelled, and it is not a fatal error
 			if err := waitForUntaintedNode(ctx, runtime.KubeConfigScheduler); err != nil && !errors.Is(err, wait.ErrWaitTimeout) {
-				signals.RequestShutdown(errors.WithMessage(err, "failed to wait for untained node"))
+				err = errors.WithMessage(err, "failed to wait for untained node")
+				nodeReady.MarkFailed(err)
+				signals.RequestShutdown(err)
+				return
 			}
 		}
+		nodeReady.MarkReady()
 	}()
 
 	logrus.Infof("Running kube-scheduler %s", config.ArgString(args))
@@ -386,16 +392,21 @@ func cloudControllerManager(ctx context.Context, cfg *config.Control) error {
 
 	logrus.Infof("Running cloud-controller-manager %s", config.ArgString(args))
 
-	ccmRBACReady := make(chan struct{})
+	ccmRBACReady := wait.New()
 
 	go func() {
-		defer close(ccmRBACReady)
-
-		<-executor.APIServerReadyChan()
+		if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
+			ccmRBACReady.MarkFailed(err)
+			return
+		}
 
 		if err := checkForCloudControllerPrivileges(ctx, cfg.Runtime); err != nil {
-			signals.RequestShutdown(errors.WithMessage(err, "failed to wait for cloud-controller-manager RBAC"))
+			err = errors.WithMessage(err, "failed to wait for cloud-controller-manager RBAC")
+			ccmRBACReady.MarkFailed(err)
+			signals.RequestShutdown(err)
+			return
 		}
+		ccmRBACReady.MarkReady()
 	}()
 	return executor.CloudControllerManager(ctx, ccmRBACReady, args)
 }

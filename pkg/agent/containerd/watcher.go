@@ -14,6 +14,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/agent/cri"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/rancher/wharfie/pkg/tarfile"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -278,9 +279,7 @@ func importAndWatchImages(ctx context.Context, cfg *config.Node) error {
 	w.workqueue.Add(cfg.Images)
 
 	// wait for the workqueue to empty before returning
-	for w.workqueue.Len() > 0 {
-		time.Sleep(500 * time.Millisecond)
-	}
+	wait.PollInfinite(500*time.Millisecond, func() (bool, error) { return w.workqueue.Len() == 0, nil })
 
 	// prune unseen entries from last run once all existing files have been processed
 	w.pruneCache()

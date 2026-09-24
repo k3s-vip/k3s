@@ -18,9 +18,9 @@ import (
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/kine/pkg/endpoint"
 	"github.com/sirupsen/logrus"
-	"k8s.io/apimachinery/pkg/util/wait"
 	utilsnet "k8s.io/utils/net"
 )
 
@@ -78,14 +78,15 @@ func (c *Cluster) Start(ctx context.Context, wg *sync.WaitGroup) error {
 
 	if c.managedDB != nil {
 		go func() {
-			for {
-				select {
-				case <-executor.ETCDReadyChan():
+			wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+				if err := executor.ETCDReadyChan().Wait(ctx); err != nil {
+					return false, nil
+				}
 					// always save to managed etcd, to ensure that any file modified locally are in sync with the datastore.
 					// this will fail if multiple keys exist, to prevent nodes from running with different bootstrap data.
 					if err := Save(ctx, c.config, false); err != nil && !errors.Is(err, context.Canceled) {
 						signals.RequestShutdown(errors.WithMessage(err, "failed to save bootstrap data"))
-						return
+						return true, nil
 					}
 
 					if !c.config.EtcdDisableSnapshots {
@@ -107,11 +108,8 @@ func (c *Cluster) Start(ctx context.Context, wg *sync.WaitGroup) error {
 							}
 						}, c.config.EtcdSnapshotReconcile.Duration, 0.05, false)
 					}
-					return
-				case <-ctx.Done():
-					return
-				}
-			}
+					return true, nil
+			})
 		}()
 	}
 

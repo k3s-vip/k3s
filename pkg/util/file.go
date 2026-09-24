@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/sirupsen/logrus"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 func SetFileModeForPath(name string, mode os.FileMode) error {
