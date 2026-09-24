@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/urfave/cli/v2"
 )
@@ -15,7 +16,7 @@ const (
 )
 
 type StartupHookArgs struct {
-	APIServerReady       <-chan struct{}
+	APIServerReady       *wait.Chan
 	KubeConfigSupervisor string
 	Skips                map[string]bool
 	Disables             map[string]bool
@@ -46,6 +47,7 @@ type Server struct {
 	KubeConfigOutput         string
 	KubeConfigMode           string
 	KubeConfigGroup          string
+	KubeConfigName           string
 	HelmJobImage             string
 	TLSSan                   cli.StringSlice
 	TLSSanSecurity           bool
@@ -151,7 +153,7 @@ var (
 	}
 	ClusterDNS = &cli.StringSliceFlag{
 		Name:        "cluster-dns",
-		Usage:       "(networking) IPv4 Cluster IP for coredns service. Should be in your service-cidr range (default: 10.43.0.10)",
+		Usage:       "(networking) IPv4/IPv6 Cluster IP for coredns service. Should be in your service-cidr range (default: 10.43.0.10)",
 		Destination: &ServerConfig.ClusterDNS,
 	}
 	ClusterDomain = &cli.StringFlag{
@@ -295,6 +297,13 @@ var ServerFlags = []cli.Flag{
 		Usage:       "(client) Write kubeconfig with this group",
 		Destination: &ServerConfig.KubeConfigGroup,
 		EnvVars:     []string{version.ProgramUpper + "_KUBECONFIG_GROUP"},
+	},
+	&cli.StringFlag{
+		Name:        "write-kubeconfig-name",
+		Usage:       "(client) Write kubeconfig using this name for the generated cluster, user, and context",
+		Destination: &ServerConfig.KubeConfigName,
+		EnvVars:     []string{version.ProgramUpper + "_KUBECONFIG_NAME"},
+		Value:       "default",
 	},
 	&cli.StringFlag{
 		Name:        "helm-job-image",

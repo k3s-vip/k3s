@@ -6,7 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/textproto"
 	"net/url"
@@ -24,6 +24,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/etcd/snapshot"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -31,7 +32,6 @@ import (
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 var (
@@ -75,7 +75,7 @@ type Client struct {
 }
 
 // Start initializes the cache and sets the cluster id and token hash,
-// returning a reference to the the initialized controller. Initialization is
+// returning a reference to the initialized controller. Initialization is
 // locked by a sync.Once to prevent races, and multiple calls to start will
 // return the same controller or error.
 func Start(ctx context.Context, config *config.Control) (*Controller, error) {
@@ -90,7 +90,7 @@ func Start(ctx context.Context, config *config.Control) (*Controller, error) {
 			controller = c
 		} else {
 			logrus.Debug("Getting S3 snapshot cluster ID and server token hash")
-			if err := wait.PollImmediateUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
+			if err := wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
 				if config.Runtime.Core == nil {
 					return false, nil
 				}
@@ -543,7 +543,7 @@ func (c *Client) ListSnapshots(ctx context.Context) (map[string]snapshot.File, e
 					logrus.Warnf("Failed to get snapshot metadata for %s: %v", filename, err)
 				}
 			} else {
-				if m, err := ioutil.ReadAll(obj); err != nil {
+				if m, err := io.ReadAll(obj); err != nil {
 					if snapshot.IsNotExist(err) {
 						logrus.Debugf("Failed to read snapshot metadata: %v", err)
 					} else {
