@@ -31,6 +31,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/util/mux"
 	"github.com/k3s-io/k3s/pkg/util/permissions"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/k3s-io/k3s/pkg/vpn"
 
@@ -41,7 +42,6 @@ import (
 	"github.com/urfave/cli/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
-	"k8s.io/apimachinery/pkg/util/wait"
 	kubeapiserverflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/controlplane/apiserver/options"
@@ -79,7 +79,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	}
 
 	klog.EnableContextualLogging(true)
-	ctx := logger.NewContext(signals.SetupSignalContext(), version.Program)
+	ctx := logger.NewContext(signals.SetupSignalContext(), "server")
 	wg := &sync.WaitGroup{}
 
 	// If exiting due to an error, ensure that contexts are cancelled so that the
@@ -157,6 +157,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	serverConfig.ControlConfig.KubeConfigOutput = cfg.KubeConfigOutput
 	serverConfig.ControlConfig.KubeConfigMode = cfg.KubeConfigMode
 	serverConfig.ControlConfig.KubeConfigGroup = cfg.KubeConfigGroup
+	serverConfig.ControlConfig.KubeConfigName = cfg.KubeConfigName
 	serverConfig.ControlConfig.HelmJobImage = cfg.HelmJobImage
 	serverConfig.ControlConfig.Rootless = cfg.Rootless
 	serverConfig.ControlConfig.ServiceLBNamespace = cfg.ServiceLBNamespace
@@ -290,7 +291,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	// Ensure that we add the localhost name/ip and node name/ip to the SAN list. This list is shared by the
 	// certs for the supervisor, kube-apiserver cert, and etcd. DNS entries for the in-cluster kubernetes
 	// service endpoint are added later when the certificates are created.
-	nodeName, nodeIPs, err := util.GetHostnameAndIPs(cmds.AgentConfig.NodeName, cmds.AgentConfig.NodeIP.Value())
+	nodeName, nodeIPs, err := util.GetHostnameAndIPs(ctx, cmds.AgentConfig.NodeName, cmds.AgentConfig.NodeIP.Value())
 	if err != nil {
 		return err
 	}
@@ -441,7 +442,6 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	if !serverConfig.ControlConfig.DisableHelmController {
 		argsMap := map[string]string{}
 		if serverConfig.ControlConfig.HelmJobImage != "" {
-			logrus.Warnf("--helm-job-image is deprecated, please use --helm-controller-arg=default-job-image=%s", serverConfig.ControlConfig.HelmJobImage)
 			argsMap["default-job-image"] = serverConfig.ControlConfig.HelmJobImage
 		}
 
@@ -642,11 +642,15 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 
 	go func() {
 		if !serverConfig.ControlConfig.DisableETCD {
-			<-executor.ETCDReadyChan()
+			if err := executor.ETCDReadyChan().Wait(ctx); err != nil {
+				return
+			}
 			logrus.Info("ETCD server is now running")
 		}
 		if !serverConfig.ControlConfig.DisableAPIServer {
-			<-executor.APIServerReadyChan()
+			if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
+				return
+			}
 			logrus.Info("Kube API server is now running")
 			serverConfig.ControlConfig.Runtime.StartupHooksWg.Wait()
 		}

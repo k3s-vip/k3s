@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/rancher/wrangler/v3/pkg/condition"
 	coreclient "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
@@ -27,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/cloud-provider/names"
 	servicehelper "k8s.io/cloud-provider/service/helpers"
@@ -78,6 +78,16 @@ func (k *k3s) Register(ctx context.Context,
 	go wait.Until(k.runWorker, time.Second, ctx.Done())
 
 	return k.removeServiceFinalizers(ctx)
+}
+
+var lbPodSelector labels.Selector
+
+func init() {
+	var err error
+	lbPodSelector, err = labels.Parse(svcNameLabel + "," + svcNamespaceLabel)
+	if err != nil {
+		panic("failed to parse servicelb label selector: " + err.Error())
+	}
 }
 
 // ensureServiceLBNamespace ensures that the configured namespace exists.
@@ -141,21 +151,94 @@ func (k *k3s) onChangePod(key string, pod *core.Pod) (*core.Pod, error) {
 	return pod, nil
 }
 
-// onChangeNode handles changes to Nodes. We need to handle this as we may need to kick the DaemonSet
-// to add or remove pods from nodes if labels have changed.
+// onChangeNode handles changes to Nodes. We may need to update the status of Services with pods on
+// this node if the node addresses used for LoadBalancer ingress have changed, and to re-evaluate the
+// ServiceLB DaemonSets if the node gained or lost daemonsetNodeLabel (including a labeled node being
+// deleted, which is one of the cases that turns the DaemonSet NodeSelector back off - that
+// NodeSelector is not managed by the apply that deploys the DaemonSets, so nothing else clears it).
 func (k *k3s) onChangeNode(key string, node *core.Node) (*core.Node, error) {
-	if node == nil {
-		return nil, nil
-	}
-	if _, ok := node.Labels[daemonsetNodeLabel]; !ok {
-		return node, nil
+	addrChanged, labelChanged := k.updateNodeState(key, node)
+
+	if addrChanged {
+		if err := k.enqueueNodeServices(key); err != nil {
+			return node, err
+		}
 	}
 
-	if err := k.updateDaemonSets(); err != nil {
-		return node, err
+	if labelChanged {
+		if err := k.updateDaemonSets(); err != nil {
+			return node, err
+		}
 	}
 
 	return node, nil
+}
+
+// updateNodeState records the current tracked state for a node under a single lock, returning
+// whether the node addresses used by LoadBalancer status changed, and whether the node's
+// daemonsetNodeLabel presence changed, since the last event. A node that is gone (node == nil) or
+// being deleted (DeletionTimestamp set) is treated as deleted and its entry is removed - there is no
+// point waiting for the final deletion event once we know it is going away; a previously-labeled node
+// going away counts as a label change so the DaemonSets can drop their NodeSelector.
+func (k *k3s) updateNodeState(key string, node *core.Node) (addrChanged, labelChanged bool) {
+	k.nodeStateMu.Lock()
+	defer k.nodeStateMu.Unlock()
+
+	prev, existed := k.nodeStates[key]
+	if node == nil || node.DeletionTimestamp != nil {
+		delete(k.nodeStates, key)
+		return false, existed && prev.hasSelectorLabel
+	}
+
+	_, hasLabel := node.Labels[daemonsetNodeLabel]
+	addresses := lbNodeAddresses(node)
+	if !existed {
+		// First time seeing this node: sync status, and evaluate the selector if it is labeled.
+		k.nodeStates[key] = nodeState{addresses: addresses, hasSelectorLabel: hasLabel}
+		return true, hasLabel
+	}
+	addrChanged = prev.addresses != addresses
+	labelChanged = prev.hasSelectorLabel != hasLabel
+	if addrChanged || labelChanged {
+		k.nodeStates[key] = nodeState{addresses: addresses, hasSelectorLabel: hasLabel}
+	}
+	return addrChanged, labelChanged
+}
+
+// enqueueNodeServices enqueues a status update for all Services with ServiceLB pods on the named
+// node. The addresses of the node hosting a pod are used as the LoadBalancer ingress IPs, so the
+// status of these Services must be re-checked when the node addresses change.
+func (k *k3s) enqueueNodeServices(nodeName string) error {
+	// ServiceLB pods are labeled with the service they front; select pods carrying those labels.
+	pods, err := k.podCache.List(k.LBNamespace, lbPodSelector)
+	if err != nil {
+		return err
+	}
+
+	// The selector guarantees both service labels are present; node name is a field, not a label,
+	// so pods on this node are matched here.
+	for _, pod := range pods {
+		if pod.Spec.NodeName != nodeName {
+			continue
+		}
+		k.workqueue.Add(pod.Labels[svcNamespaceLabel] + "/" + pod.Labels[svcNameLabel])
+	}
+
+	return nil
+}
+
+// lbNodeAddresses returns a stable representation of the node addresses used to populate
+// LoadBalancer status, so that changes to them can be detected. Addresses that are not used
+// by the load balancer, such as the node hostname, are ignored.
+func lbNodeAddresses(node *core.Node) string {
+	addresses := make([]string, 0, len(node.Status.Addresses))
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == core.NodeExternalIP || addr.Type == core.NodeInternalIP {
+			addresses = append(addresses, string(addr.Type)+"="+addr.Address)
+		}
+	}
+	slices.Sort(addresses)
+	return strings.Join(addresses, ",")
 }
 
 // onChangeEndpointSlice handles changes to EndpointSlices. This is used to ensure that LoadBalancer
@@ -389,8 +472,8 @@ func filterByIPFamily(ips []string, svc *core.Service) ([]string, error) {
 		}
 	}
 
-	sort.Strings(ipv4Addresses)
-	sort.Strings(ipv6Addresses)
+	slices.Sort(ipv4Addresses)
+	slices.Sort(ipv6Addresses)
 
 	for _, ipFamily := range svc.Spec.IPFamilies {
 		switch ipFamily {

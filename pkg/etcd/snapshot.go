@@ -26,6 +26,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/k3s/pkg/util/metrics"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/robfig/cron/v3"
 	"github.com/sirupsen/logrus"
@@ -37,7 +38,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/pager"
 	"k8s.io/client-go/util/retry"
 )
@@ -248,6 +248,11 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 	if status.IsLearner {
 		logrus.Warnf("Unable to take snapshot: not supported for learner")
 		return nil, nil
+	}
+	_, err = e.client.Defragment(ctx, endpoints[0])
+	if err != nil {
+		logrus.Warnf("Unable to defragment etcd: %v", err)
+		return nil, errors.WithMessage(err, "failed to defragment etcd for snapshot")
 	}
 
 	snapshotDir, err := snapshotDir(e.config, true)

@@ -16,6 +16,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/metrics"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/services"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/prometheus/client_golang/prometheus"
 	certutil "github.com/rancher/dynamiclistener/cert"
@@ -23,7 +24,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 var (
@@ -86,7 +86,9 @@ func Setup(ctx context.Context, nodeConfig *daemonconfig.Node, dataDir string) e
 
 	go wait.Until(func() {
 		// don't check and create events until after the apiserver is up, otherwise the events may be lost.
-		<-executor.APIServerReadyChan()
+		if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
+			return
+		}
 
 		logrus.Debugf("Running %s certificate expiration check", controllerName)
 		var hasErr bool
