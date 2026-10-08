@@ -84,7 +84,6 @@ type Containerd struct {
 	NonrootDevices bool
 	SELinux        bool
 	Debug          bool
-	ConfigVersion  int
 }
 
 type CRIDockerd struct {
@@ -121,6 +120,7 @@ type Agent struct {
 	ClusterDomain           string
 	ResolvConf              string
 	RootDir                 string
+	KubeletConfig           string
 	KubeletConfigDir        string
 	KubeConfigKubelet       string
 	KubeConfigKubeProxy     string
@@ -207,6 +207,7 @@ type Control struct {
 	KubeConfigOutput         string
 	KubeConfigMode           string
 	KubeConfigGroup          string
+	KubeConfigName           string
 	HelmJobImage             string
 	DataDir                  string
 	KineTLS                  bool
@@ -244,6 +245,7 @@ type Control struct {
 	EtcdDisableSnapshots     bool            `json:"-"`
 	EtcdExposeMetrics        bool            `json:"-"`
 	EtcdSnapshotDir          string          `json:"-"`
+	EtcdSnapshotRestrictions []string        `json:"-"`
 	EtcdSnapshotCron         string          `json:"-"`
 	EtcdSnapshotReconcile    metav1.Duration `json:"-"`
 	EtcdSnapshotRetention    int             `json:"-"`

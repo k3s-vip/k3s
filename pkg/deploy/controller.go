@@ -10,7 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +21,7 @@ import (
 	pkgutil "github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/k3s/pkg/util/logger"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/rancher/wrangler/v3/pkg/apply"
 	"github.com/rancher/wrangler/v3/pkg/kv"
 	"github.com/rancher/wrangler/v3/pkg/objectset"
@@ -96,18 +97,14 @@ type watchedFile struct {
 func (w *watcher) start(ctx context.Context, client kubernetes.Interface) {
 	w.recorder = pkgutil.BuildControllerEventRecorder(logger.NewContext(ctx, ControllerName), client, ControllerName, metav1.NamespaceSystem)
 	force := true
-	for {
+	wait.PollUntilContextCancel(ctx, 15*time.Second, true, func(_ context.Context) (bool, error) {
 		if err := w.listFiles(force); err == nil {
 			force = false
 		} else {
 			logrus.Errorf("Failed to process config: %v", err)
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(15 * time.Second):
-		}
-	}
+		return false, nil
+	})
 }
 
 // listFiles calls listFilesIn on a list of paths.
@@ -142,7 +139,7 @@ func (w *watcher) listFilesIn(base string, force bool) error {
 		keys[keyIndex] = path
 		keyIndex++
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	var errs []error
 	for _, path := range keys {
