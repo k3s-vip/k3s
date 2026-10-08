@@ -3,7 +3,6 @@ package spegel
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,7 +124,7 @@ func (c *agentBootstrapper) Run(ctx context.Context, id peer.AddrInfo) error {
 			return false, err
 		}
 		addresses := string(b)
-		address := fmt.Sprintf("%s/p2p/%s", id.Addrs[0].String(), id.ID.String())
+		address := id.Addrs[0].String() + "/p2p/" + id.ID.String()
 
 		patch := util.NewPatchList()
 		patcher := util.NewPatcher[*v1.Node](client.CoreV1().Nodes())

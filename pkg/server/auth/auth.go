@@ -14,7 +14,6 @@ import (
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apiserver/pkg/apis/apiserver"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/apiserver/pkg/authorization/union"
@@ -105,9 +104,9 @@ func Delegated(clientCA, kubeConfig string, config *server.Config) mux.Middlewar
 	}
 
 	authn := options.NewDelegatingAuthenticationOptions()
+	authn.DisableAnonymous = true
 	authn.SkipInClusterLookup = true
 	authn.RemoteKubeConfigFile = kubeConfig
-	authn.Anonymous = &apiserver.AnonymousAuthConfig{Enabled: false}
 	authn.ClientCert = options.ClientCertAuthenticationOptions{ClientCA: clientCA}
 	if err := authn.ApplyTo(&config.Authentication, config.SecureServing, nil); err != nil {
 		logrus.Fatalf("Failed to apply authentication configuration: %v", err)
@@ -126,16 +125,10 @@ func Delegated(clientCA, kubeConfig string, config *server.Config) mux.Middlewar
 	// access to unauthenticated users, even if authn.Anonymous is disabled.
 	registryAuth, err := NewNonResourceGroupAuthorizer(user.AllAuthenticated, "/v1-"+version.Program+"/p2p", "/v2/*")
 	if err != nil {
-		logrus.Fatalf("Failed to create group authorizer: %v", err)
+		logrus.Fatalf("Failed to create authorizer: %v", err)
 	}
 
-	config.Authorization.Authorizer, err = union.New(
-		union.NamedAuthorizer{AuthorizerName: "registry", Authorizer: registryAuth},
-		union.NamedAuthorizer{AuthorizerName: "core", Authorizer: config.Authorization.Authorizer},
-	)
-	if err != nil {
-		logrus.Fatalf("Failed to create union authorizer: %v", err)
-	}
+	config.Authorization.Authorizer = union.New(registryAuth, config.Authorization.Authorizer)
 
 	return func(handler http.Handler) http.Handler {
 		handler = genericapifilters.WithAuthorization(handler, config.Authorization.Authorizer, scheme.Codecs)

@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	apiserverconfigv1 "k8s.io/apiserver/pkg/apis/apiserver/v1"
+	apiserverconfigv1 "k8s.io/apiserver/pkg/apis/config/v1"
 	"k8s.io/client-go/tools/pager"
 	"k8s.io/utils/ptr"
 )
@@ -453,7 +453,7 @@ func updateSecrets(ctx context.Context, control *config.Control, nodeName string
 	}
 
 	// For backwards compatibility with the old controller, we use an event recorder instead of logrus
-	recorder := util.BuildControllerEventRecorder(ctx, k8s, "secrets-reencrypt", metav1.NamespaceDefault)
+	recorder := util.BuildControllerEventRecorder(k8s, "secrets-reencrypt", metav1.NamespaceDefault)
 
 	secretPager := pager.New(pager.SimplePageFunc(func(opts metav1.ListOptions) (runtime.Object, error) {
 		return k8s.CoreV1().Secrets(metav1.NamespaceAll).List(ctx, opts)
