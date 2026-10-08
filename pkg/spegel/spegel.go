@@ -26,6 +26,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/util/mux"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -39,7 +40,6 @@ import (
 	"github.com/spegel-org/spegel/pkg/routing"
 	"github.com/spegel-org/spegel/pkg/state"
 	"github.com/spegel-org/spegel/pkg/web"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/component-base/metrics/legacyregistry"
 )
 
@@ -116,7 +116,7 @@ func init() {
 }
 
 // Start starts the embedded p2p router, and binds the registry API to an existing HTTP router.
-func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyChan <-chan struct{}) error {
+func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReady *wait.Chan) error {
 	localAddr := net.JoinHostPort(c.InternalAddress, c.RegistryPort)
 	// distribute images for all configured mirrors. there doesn't need to be a
 	// configured endpoint, just having a key for the registry will do.
@@ -278,7 +278,9 @@ func (c *Config) Start(ctx context.Context, nodeConfig *config.Node, criReadyCha
 	// Track images available in containerd and publish via p2p router
 	go func() {
 		defer ociStore.Close()
-		<-criReadyChan
+		if err := criReady.Wait(ctx); err != nil {
+			return
+		}
 		wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
 			logrus.Debug("Starting embedded registry image state tracker")
 			if err := ociStore.Start(); err != nil {

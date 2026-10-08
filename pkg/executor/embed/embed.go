@@ -27,6 +27,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/k3s-io/k3s/pkg/vpn"
 	"github.com/sirupsen/logrus"
@@ -57,9 +58,9 @@ var _ executor.Executor = &Embedded{}
 var _ vpn.InfoProvider = &Embedded{}
 
 type Embedded struct {
-	apiServerReady <-chan struct{}
-	etcdReady      chan struct{}
-	criReady       chan struct{}
+	apiServerReady *wait.Chan
+	etcdReady      *wait.Chan
+	criReady       *wait.Chan
 	nodeConfig     *daemonconfig.Node
 	vpnInfo        *vpn.Info
 }
@@ -135,8 +136,8 @@ func New(ctx context.Context, cfg *cmds.Agent) (*Embedded, error) {
 
 func (e *Embedded) Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node, cfg cmds.Agent) error {
 	e.apiServerReady = util.APIServerReadyChan(ctx, nodeConfig.AgentConfig.KubeConfigK3sController, util.DefaultAPIServerReadyTimeout)
-	e.etcdReady = make(chan struct{})
-	e.criReady = make(chan struct{})
+	e.etcdReady = wait.New()
+	e.criReady = wait.New()
 	e.nodeConfig = nodeConfig
 
 	go once.Do(func() {
@@ -147,17 +148,12 @@ func (e *Embedded) Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node,
 		defer cancel()
 
 		klog.InitFlags(nil)
-		for {
+		wait.PollUntilContextCancel(logCtx, time.Second, true, func(_ context.Context) (bool, error) {
 			flag.Set("v", strconv.Itoa(cmds.LogConfig.VLevel))
 			flag.Set("legacy_stderr_threshold_behavior", "false")
 			flag.Set("stderrthreshold", "INFO")
-
-			select {
-			case <-time.After(time.Second):
-			case <-logCtx.Done():
-				return
-			}
-		}
+			return false, nil
+		})
 	})
 
 	if nodeConfig.Flannel.Backend != flannel.BackendNone {
@@ -200,7 +196,9 @@ func (e *Embedded) Kubelet(ctx context.Context, args []string) error {
 	command.SetArgs(args)
 
 	go func() {
-		<-e.APIServerReadyChan()
+		if err := e.APIServerReadyChan().Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("kubelet panic: %v", err)
@@ -221,7 +219,9 @@ func (e *Embedded) KubeProxy(ctx context.Context, args []string) error {
 	command.SetArgs(util.GetArgs(platformKubeProxyArgs(e.nodeConfig), args))
 
 	go func() {
-		<-e.APIServerReadyChan()
+		if err := e.APIServerReadyChan().Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("kube-proxy panic: %v", err)
@@ -254,7 +254,9 @@ func (e *Embedded) APIServer(ctx context.Context, args []string) error {
 	command.SetArgs(args)
 
 	go func() {
-		<-e.ETCDReadyChan()
+		if err := e.ETCDReadyChan().Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("apiserver panic: %v", err)
@@ -270,13 +272,17 @@ func (e *Embedded) APIServer(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (e *Embedded) Scheduler(ctx context.Context, nodeReady <-chan struct{}, args []string) error {
+func (e *Embedded) Scheduler(ctx context.Context, nodeReady *wait.Chan, args []string) error {
 	command := sapp.NewSchedulerCommand()
 	command.SetArgs(args)
 
 	go func() {
-		<-e.APIServerReadyChan()
-		<-nodeReady
+		if err := e.APIServerReadyChan().Wait(ctx); err != nil {
+			return
+		}
+		if err := nodeReady.Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("scheduler panic: %v", err)
@@ -297,7 +303,9 @@ func (e *Embedded) ControllerManager(ctx context.Context, args []string) error {
 	command.SetArgs(args)
 
 	go func() {
-		<-e.APIServerReadyChan()
+		if err := e.APIServerReadyChan().Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("controller-manager panic: %v", err)
@@ -313,7 +321,7 @@ func (e *Embedded) ControllerManager(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (*Embedded) CloudControllerManager(ctx context.Context, ccmRBACReady <-chan struct{}, args []string) error {
+func (*Embedded) CloudControllerManager(ctx context.Context, ccmRBACReady *wait.Chan, args []string) error {
 	ccmOptions, err := ccmopt.NewCloudControllerManagerOptions()
 	if err != nil {
 		logrus.Fatalf("unable to initialize command options: %v", err)
@@ -340,7 +348,9 @@ func (*Embedded) CloudControllerManager(ctx context.Context, ccmRBACReady <-chan
 	command.SetArgs(args)
 
 	go func() {
-		<-ccmRBACReady
+		if err := ccmRBACReady.Wait(ctx); err != nil {
+			return
+		}
 		defer func() {
 			if err := recover(); err != nil {
 				logrus.WithField("stack", string(debug.Stack())).Fatalf("cloud-controller-manager panic: %v", err)
@@ -366,40 +376,43 @@ func (e *Embedded) ETCD(ctx context.Context, wg *sync.WaitGroup, args *executor.
 	// and ready to accept client requests.
 	if e.etcdReady != nil {
 		go func() {
-			for {
+			wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 				if err := test(ctx, true); err != nil {
 					logrus.Infof("Failed to test etcd connection: %v", err)
-				} else {
-					logrus.Info("Connection to etcd is ready")
-					close(e.etcdReady)
-					return
+					return false, nil
 				}
-
-				select {
-				case <-time.After(5 * time.Second):
-				case <-ctx.Done():
-					return
-				}
-			}
+				logrus.Info("Connection to etcd is ready")
+				e.etcdReady.MarkReady()
+				return true, nil
+			})
 		}()
 	}
 	return etcd.StartETCD(ctx, wg, args, extraArgs)
 }
 
 func (e *Embedded) Containerd(ctx context.Context, cfg *daemonconfig.Node) error {
-	return executor.CloseIfNilErr(containerd.Run(ctx, cfg), e.criReady)
+	return e.markCRIReady(containerd.Run(ctx, cfg))
 }
 
 func (e *Embedded) Docker(ctx context.Context, cfg *daemonconfig.Node) error {
-	return executor.CloseIfNilErr(cridockerd.Run(ctx, cfg), e.criReady)
+	return e.markCRIReady(cridockerd.Run(ctx, cfg))
 }
 
 func (e *Embedded) CRI(ctx context.Context, cfg *daemonconfig.Node) error {
 	// agentless sets cri socket path to /dev/null to indicate no CRI is needed
 	if cfg.ContainerRuntimeEndpoint != "/dev/null" {
-		return executor.CloseIfNilErr(cri.WaitForService(ctx, cfg.ContainerRuntimeEndpoint, "CRI"), e.criReady)
+		return e.markCRIReady(cri.WaitForService(ctx, cfg.ContainerRuntimeEndpoint, "CRI"))
 	}
-	return executor.CloseIfNilErr(nil, e.criReady)
+	return e.markCRIReady(nil)
+}
+
+func (e *Embedded) markCRIReady(err error) error {
+	if err != nil {
+		e.criReady.MarkFailed(err)
+	} else {
+		e.criReady.MarkReady()
+	}
+	return err
 }
 
 func (e *Embedded) CNI(ctx context.Context, wg *sync.WaitGroup, cfg *daemonconfig.Node) error {
@@ -427,21 +440,21 @@ func (e *Embedded) CNI(ctx context.Context, wg *sync.WaitGroup, cfg *daemonconfi
 	return nil
 }
 
-func (e *Embedded) APIServerReadyChan() <-chan struct{} {
+func (e *Embedded) APIServerReadyChan() *wait.Chan {
 	if e.apiServerReady == nil {
 		panic("executor not bootstrapped")
 	}
 	return e.apiServerReady
 }
 
-func (e *Embedded) ETCDReadyChan() <-chan struct{} {
+func (e *Embedded) ETCDReadyChan() *wait.Chan {
 	if e.etcdReady == nil {
 		panic("executor not bootstrapped")
 	}
 	return e.etcdReady
 }
 
-func (e *Embedded) CRIReadyChan() <-chan struct{} {
+func (e *Embedded) CRIReadyChan() *wait.Chan {
 	if e.criReady == nil {
 		panic("executor not bootstrapped")
 	}
