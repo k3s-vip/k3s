@@ -40,17 +40,6 @@ func getContainerdArgs(cfg *config.Node) []string {
 		"containerd",
 		"-c", cfg.Containerd.Config,
 	}
-
-	// Historically the linux containerd config template did not include
-	// address/state/root settings, so they need to be passed on the command line
-	// in case the user-provided template still lacks them.
-	if cfg.Containerd.ConfigVersion < 3 {
-		args = append(args,
-			"-a", cfg.Containerd.Address,
-			"--state", cfg.Containerd.State,
-			"--root", cfg.Containerd.Root,
-		)
-	}
 	return args
 }
 

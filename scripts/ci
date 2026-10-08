@@ -4,8 +4,9 @@ set -e
 SCRIPT_DIR=$(dirname $0)
 pushd $SCRIPT_DIR
 
-./download
 ./validate
+export ARCH=$(go env GOHOSTARCH)
+./download
 ./build
 ./package
 

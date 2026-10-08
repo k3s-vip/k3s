@@ -18,9 +18,9 @@ import (
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/kine/pkg/endpoint"
 	"github.com/sirupsen/logrus"
-	"k8s.io/apimachinery/pkg/util/wait"
 	utilsnet "k8s.io/utils/net"
 )
 
@@ -78,20 +78,21 @@ func (c *Cluster) Start(ctx context.Context, wg *sync.WaitGroup) error {
 
 	if c.managedDB != nil {
 		go func() {
-			for {
-				select {
-				case <-executor.ETCDReadyChan():
+			wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+				if err := executor.ETCDReadyChan().Wait(ctx); err != nil {
+					return false, nil
+				}
 					// always save to managed etcd, to ensure that any file modified locally are in sync with the datastore.
 					// this will fail if multiple keys exist, to prevent nodes from running with different bootstrap data.
 					if err := Save(ctx, c.config, false); err != nil && !errors.Is(err, context.Canceled) {
 						signals.RequestShutdown(errors.WithMessage(err, "failed to save bootstrap data"))
-						return
+						return true, nil
 					}
 
 					if !c.config.EtcdDisableSnapshots {
 						// do an initial reconcile of snapshots with a fast retry until it succeeds
 						backoff := wait.Backoff{Duration: time.Second, Factor: 2, Steps: 5}
-						backoff.DelayFunc().Until(ctx, true, false, func(ctx context.Context) (bool, error) {
+						wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {
 							if err := c.managedDB.ReconcileSnapshotData(ctx); err != nil {
 								logrus.Errorf("Failed to record snapshots for cluster: %v", err)
 								return false, nil
@@ -107,11 +108,8 @@ func (c *Cluster) Start(ctx context.Context, wg *sync.WaitGroup) error {
 							}
 						}, c.config.EtcdSnapshotReconcile.Duration, 0.05, false)
 					}
-					return
-				case <-ctx.Done():
-					return
-				}
-			}
+					return true, nil
+			})
 		}()
 	}
 
@@ -125,7 +123,7 @@ func (c *Cluster) startEtcdProxy(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, nodeIPs, err := util.GetHostnameAndIPs(cmds.AgentConfig.NodeName, cmds.AgentConfig.NodeIP.Value())
+	_, nodeIPs, err := util.GetHostnameAndIPs(ctx, cmds.AgentConfig.NodeName, cmds.AgentConfig.NodeIP.Value())
 	if err != nil {
 		return errors.WithMessage(err, "failed to get node name and addresses")
 	}

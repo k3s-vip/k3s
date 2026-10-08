@@ -120,16 +120,19 @@ func getVPNAuthInfo(vpnAuth string) (vpnCliAuthInfo, error) {
 
 	vpnParameters := strings.Split(vpnCommand, ",")
 	for _, vpnKeyValues := range vpnParameters {
-		vpnKeyValue := strings.Split(vpnKeyValues, "=")
-		switch vpnKeyValue[0] {
+		key, value, found := strings.Cut(vpnKeyValues, "=")
+		if !found {
+			return vpnCliAuthInfo{}, fmt.Errorf("VPN Error. The passed VPN auth info includes an invalid parameter: %v", key)
+		}
+		switch key {
 		case "name":
-			authInfo.Name = vpnKeyValue[1]
+			authInfo.Name = value
 		case "joinKey":
-			authInfo.JoinKey = vpnKeyValue[1]
+			authInfo.JoinKey = value
 		case "controlServerURL":
-			authInfo.ControlServerURL = vpnKeyValue[1]
+			authInfo.ControlServerURL = value
 		default:
-			return vpnCliAuthInfo{}, fmt.Errorf("VPN Error. The passed VPN auth info includes an unknown parameter: %v", vpnKeyValue[0])
+			return vpnCliAuthInfo{}, fmt.Errorf("VPN Error. The passed VPN auth info includes an unknown parameter: %v", key)
 		}
 	}
 

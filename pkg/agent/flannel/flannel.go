@@ -15,6 +15,7 @@
 package flannel
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 	"net"
@@ -26,11 +27,13 @@ import (
 	"github.com/flannel-io/flannel/pkg/backend"
 	"github.com/flannel-io/flannel/pkg/ip"
 	"github.com/flannel-io/flannel/pkg/subnet/kube"
+	"github.com/flannel-io/flannel/pkg/trafficmngr"
 	"github.com/flannel-io/flannel/pkg/trafficmngr/iptables"
+	"github.com/flannel-io/flannel/pkg/trafficmngr/nftables"
 	"github.com/joho/godotenv"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 
 	// Backends need to be imported for their init() to get executed and them to register
 	_ "github.com/flannel-io/flannel/pkg/backend/extension"
@@ -89,7 +92,16 @@ func flannel(ctx context.Context, wg *sync.WaitGroup, flannelIface *net.Interfac
 	if err != nil {
 		return errors.WithMessage(err, "failed to register flannel network")
 	}
-	trafficMngr := &iptables.IPTablesManager{}
+
+	// Instanciate a TrafficManager to clean-up the rules of the backend we don't use
+	// This is to ensure a clean state in case flannel is restarted with a different choice
+	cleanupMngr := newTrafficManager(!config.EnableNFTables)
+	err = cleanupMngr.CleanUp(ctx)
+	if err != nil {
+		return errors.WithMessage(err, "failed to clean up flannel network")
+	}
+	//Create TrafficManager and instantiate it based on whether we use iptables or nftables
+	trafficMngr := newTrafficManager(config.EnableNFTables)
 	err = trafficMngr.Init(ctx)
 	if err != nil {
 		return errors.WithMessage(err, "failed to initialize flannel ipTables manager")
@@ -226,7 +238,6 @@ func WriteSubnetFile(path string, nw ip.IP4Net, nwv6 ip.IP6Net, ipMasq bool, bn 
 func ReadCIDRFromSubnetFile(path string, key string) ip.IP4Net {
 	prevCIDRs := ReadCIDRsFromSubnetFile(path, key)
 	if len(prevCIDRs) == 0 {
-		logrus.Warningf("no subnet found for key: %s in file: %s", key, path)
 		return ip.IP4Net{IP: 0, PrefixLen: 0}
 	} else if len(prevCIDRs) > 1 {
 		logrus.Errorf("error reading subnet: more than 1 entry found for key: %s in file %s: ", key, path)
@@ -260,7 +271,6 @@ func ReadCIDRsFromSubnetFile(path string, key string) []ip.IP4Net {
 func ReadIP6CIDRFromSubnetFile(path string, key string) ip.IP6Net {
 	prevCIDRs := ReadIP6CIDRsFromSubnetFile(path, key)
 	if len(prevCIDRs) == 0 {
-		logrus.Warningf("no subnet found for key: %s in file: %s", key, path)
 		return ip.IP6Net{IP: (*ip.IP6)(big.NewInt(0)), PrefixLen: 0}
 	} else if len(prevCIDRs) > 1 {
 		logrus.Errorf("error reading subnet: more than 1 entry found for key: %s in file %s: ", key, path)
@@ -288,4 +298,23 @@ func ReadIP6CIDRsFromSubnetFile(path string, key string) []ip.IP6Net {
 		}
 	}
 	return prevCIDRs
+}
+
+func newTrafficManager(useNftables bool) trafficmngr.TrafficManager {
+	if useNftables {
+		return &nftables.NFTablesManager{}
+	} else {
+		return &iptables.IPTablesManager{}
+	}
+}
+func SubnetFileReadyCondition() wait.ConditionWithContextFunc {
+	return func(ctx context.Context) (bool, error) {
+		subnet, err := godotenv.Read(subnetFile)
+		if err != nil {
+			return false, nil
+		}
+		_, hasMTU := subnet["FLANNEL_MTU"]
+		_, hasIPMasq := subnet["FLANNEL_IPMASQ"]
+		return hasMTU && hasIPMasq, nil
+	}
 }
