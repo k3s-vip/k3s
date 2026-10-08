@@ -188,12 +188,12 @@ func NewTemporaryStore(dataDir string) (*TemporaryStore, error) {
 		},
 	}
 	if err := copy.Copy(dataDir, tempDir, copyOpts); err != nil {
-		return nil, err
+		return nil, errors.Join(err, os.RemoveAll(tempDir))
 	}
 
 	s, err := NewStore(tempDir)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, os.RemoveAll(tempDir))
 	}
 
 	return &TemporaryStore{store: s, dataDir: tempDir}, nil
@@ -318,7 +318,11 @@ func (s *Store) List(ctx context.Context, key string, rev int64) ([]*mvccpb.KeyV
 	if err != nil {
 		return nil, err
 	}
-	return resp.KVs, nil
+	respKVs := make([]*mvccpb.KeyValue, len(resp.KVs))
+	for i := range resp.KVs {
+		respKVs[i] = &resp.KVs[i]
+	}
+	return respKVs, nil
 }
 
 func (s *Store) Get(ctx context.Context, key string) (*mvccpb.KeyValue, error) {
@@ -328,7 +332,7 @@ func (s *Store) Get(ctx context.Context, key string) (*mvccpb.KeyValue, error) {
 	}
 
 	if len(resp.KVs) == 1 {
-		return resp.KVs[0], nil
+		return &resp.KVs[0], nil
 	}
 
 	return nil, etcderrors.ErrKeyNotFound

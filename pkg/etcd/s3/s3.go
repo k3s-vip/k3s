@@ -90,7 +90,7 @@ func Start(ctx context.Context, config *config.Control) (*Controller, error) {
 			controller = c
 		} else {
 			logrus.Debug("Getting S3 snapshot cluster ID and server token hash")
-			if err := wait.PollImmediateUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
+			if err := wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
 				if config.Runtime.Core == nil {
 					return false, nil
 				}
