@@ -34,7 +34,7 @@ func registerEndpointsHandlers(ctx context.Context, etcd *ETCD) {
 	}
 
 	logrus.Infof("Starting managed etcd apiserver addresses controller")
-	go h.informer.RunWithContext(ctx)
+	go h.informer.Run(ctx.Done())
 	go h.watchEndpointSlice(ctx)
 }
 

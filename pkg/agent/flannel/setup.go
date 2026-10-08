@@ -19,11 +19,7 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
-	toolscache "k8s.io/client-go/tools/cache"
-	toolswatch "k8s.io/client-go/tools/watch"
 	utilsnet "k8s.io/utils/net"
 )
 
@@ -127,15 +123,7 @@ func Run(ctx context.Context, wg *sync.WaitGroup, nodeConfig *config.Node) error
 
 // waitForPodCIDR watches nodes with this node's name, and returns when the PodCIDR has been set.
 func waitForPodCIDR(ctx context.Context, nodeName string, coreClient kubernetes.Interface) error {
-	lw := toolscache.NewListWatchFromClient(coreClient.CoreV1().RESTClient(), "nodes", metav1.NamespaceNone, fields.OneTermEqualSelector(metav1.ObjectNameField, nodeName))
-	condition := func(ev watch.Event) (bool, error) {
-		if n, ok := ev.Object.(*v1.Node); ok {
-			return n.Spec.PodCIDR != "", nil
-		}
-		return false, errors.New("event object not of type v1.Node")
-	}
-
-	if _, err := toolswatch.UntilWithSync(ctx, lw, &v1.Node{}, nil, condition); err != nil {
+	if err := util.WaitForNode(ctx, coreClient, nodeName, func(node *v1.Node) (bool, error) { return node.Spec.PodCIDR != "", nil }); err != nil {
 		return errors.WithMessage(err, "failed to wait for PodCIDR assignment")
 	}
 
