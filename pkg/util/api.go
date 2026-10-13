@@ -10,6 +10,7 @@ import (
 
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/rancher/wrangler/v3/pkg/schemes"
 	"github.com/sirupsen/logrus"
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -17,7 +18,6 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	clientset "k8s.io/client-go/kubernetes"
 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
@@ -104,9 +104,10 @@ func WaitForAPIServerReady(ctx context.Context, kubeconfigPath string, timeout t
 		return err
 	}
 
+	req := restClient.Get().AbsPath("/readyz").Param("exclude", "kms-providers").Param("verbose", "true")
 	err = wait.PollUntilContextTimeout(ctx, time.Second*2, timeout, true, func(ctx context.Context) (bool, error) {
 		// DoRaw returns an error if the response code is < 200 OK or > 206 Partial Content
-		if _, err := restClient.Get().AbsPath("/readyz").Param("verbose", "").DoRaw(ctx); err != nil {
+		if _, err := req.DoRaw(ctx); err != nil {
 			if err.Error() != lastErr.Error() {
 				logrus.Infof("Polling for API server readiness: GET /readyz failed: %v", err)
 			} else {
@@ -129,15 +130,17 @@ func WaitForAPIServerReady(ctx context.Context, kubeconfigPath string, timeout t
 // APIServerReadyChan wraps WaitForAPIServerReady, returning a channel that
 // is closed when the apiserver is ready.  If the apiserver does not become
 // ready within the expected duration, a fatal error is raised.
-func APIServerReadyChan(ctx context.Context, kubeConfig string, timeout time.Duration) <-chan struct{} {
-	ready := make(chan struct{})
+func APIServerReadyChan(ctx context.Context, kubeConfig string, timeout time.Duration) *wait.Chan {
+	ready := wait.New()
 
 	go func() {
 		if err := WaitForAPIServerReady(ctx, kubeConfig, timeout); err != nil {
-			signals.RequestShutdown(errors.WithMessage(err, "failed to wait for API server to become ready"))
+			err = errors.WithMessage(err, "failed to wait for API server to become ready")
+			ready.MarkFailed(err)
+			signals.RequestShutdown(err)
 			return
 		}
-		close(ready)
+		ready.MarkReady()
 	}()
 
 	return ready
