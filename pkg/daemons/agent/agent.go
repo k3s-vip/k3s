@@ -34,7 +34,9 @@ func Agent(ctx context.Context, nodeConfig *daemonconfig.Node, proxy proxy.Proxy
 	defer logs.FlushLogs()
 
 	go func() {
-		<-executor.CRIReadyChan()
+		if err := executor.CRIReadyChan().Wait(ctx); err != nil {
+			return
+		}
 		if err := startKubelet(ctx, &nodeConfig.AgentConfig); err != nil {
 			signals.RequestShutdown(errors.WithMessage(err, "failed to start kubelet"))
 		}

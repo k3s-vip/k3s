@@ -10,10 +10,10 @@ import (
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/etcd/store"
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/sirupsen/logrus"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // maxBootstrapWaitAttempts is the number of iterations to wait for another node to populate an empty bootstrap key.

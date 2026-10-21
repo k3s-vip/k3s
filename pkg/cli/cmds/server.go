@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/urfave/cli/v2"
 )
@@ -15,7 +16,7 @@ const (
 )
 
 type StartupHookArgs struct {
-	APIServerReady       <-chan struct{}
+	APIServerReady       *wait.Chan
 	KubeConfigSupervisor string
 	Skips                map[string]bool
 	Disables             map[string]bool
