@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/k3s-io/k3s/pkg/daemons/executor"
@@ -23,6 +24,25 @@ func StartETCD(ctx context.Context, wg *sync.WaitGroup, args *executor.ETCDConfi
 		return nil
 	}
 
+	extraArgs = func(extraArgs []string) []string {
+		argsStr := strings.Join(extraArgs, ",")
+		for key, value := range map[string]string{
+			"auth-token-ttl":            "300",
+			"auto-compaction-mode":      "periodic",
+			"auto-compaction-retention": "1h",
+			"log-level":                 "info",
+			"quota-backend-bytes":       "8589934592",
+		} {
+			if !strings.Contains(argsStr, key) {
+				if len(argsStr) != 0 {
+					argsStr = key + "=" + value + "," + argsStr
+				} else {
+					argsStr = key + "=" + value
+				}
+			}
+		}
+		return strings.Split(argsStr, ",")
+	}(extraArgs)
 	configFile, err := args.ToConfigFile(extraArgs)
 	if err != nil {
 		return err

@@ -226,7 +226,6 @@ func WriteSubnetFile(path string, nw ip.IP4Net, nwv6 ip.IP6Net, ipMasq bool, bn 
 func ReadCIDRFromSubnetFile(path string, key string) ip.IP4Net {
 	prevCIDRs := ReadCIDRsFromSubnetFile(path, key)
 	if len(prevCIDRs) == 0 {
-		logrus.Warningf("no subnet found for key: %s in file: %s", key, path)
 		return ip.IP4Net{IP: 0, PrefixLen: 0}
 	} else if len(prevCIDRs) > 1 {
 		logrus.Errorf("error reading subnet: more than 1 entry found for key: %s in file %s: ", key, path)
@@ -260,7 +259,6 @@ func ReadCIDRsFromSubnetFile(path string, key string) []ip.IP4Net {
 func ReadIP6CIDRFromSubnetFile(path string, key string) ip.IP6Net {
 	prevCIDRs := ReadIP6CIDRsFromSubnetFile(path, key)
 	if len(prevCIDRs) == 0 {
-		logrus.Warningf("no subnet found for key: %s in file: %s", key, path)
 		return ip.IP6Net{IP: (*ip.IP6)(big.NewInt(0)), PrefixLen: 0}
 	} else if len(prevCIDRs) > 1 {
 		logrus.Errorf("error reading subnet: more than 1 entry found for key: %s in file %s: ", key, path)

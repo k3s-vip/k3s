@@ -190,12 +190,12 @@ func defaultKubeletConfig(cfg *daemonconfig.Agent) (*kubeletconfig.KubeletConfig
 		SyncFrequency:                    metav1.Duration{Duration: time.Minute},
 		VolumeStatsAggPeriod:             metav1.Duration{Duration: time.Minute},
 		EvictionHard: map[string]string{
-			"imagefs.available": "5%",
-			"nodefs.available":  "5%",
+			"imagefs.available": "7%",
+			"nodefs.available":  "7%",
 		},
 		EvictionMinimumReclaim: map[string]string{
-			"imagefs.available": "10%",
-			"nodefs.available":  "10%",
+			"imagefs.available": "12%",
+			"nodefs.available":  "12%",
 		},
 		Authentication: kubeletconfig.KubeletAuthentication{
 			Anonymous: kubeletconfig.KubeletAnonymousAuthentication{
