@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -19,12 +18,12 @@ import (
 	"github.com/k3s-io/k3s/pkg/dataverify"
 	"github.com/k3s-io/k3s/pkg/flock"
 	"github.com/k3s-io/k3s/pkg/untar"
+	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/home"
 	"github.com/k3s-io/k3s/pkg/version"
-	pkgerrors "github.com/pkg/errors"
-	"github.com/rancher/wrangler/pkg/resolvehome"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 )
 
 var criDefaultConfigPath = "/etc/crictl.yaml"
@@ -51,7 +50,8 @@ func main() {
 	// Handle subcommand invocation (k3s server, k3s crictl, etc)
 	app := cmds.NewApp()
 	app.EnableBashCompletion = true
-	app.Commands = []cli.Command{
+	app.DisableSliceFlagSeparator = true
+	app.Commands = []*cli.Command{
 		cmds.NewServerCommand(internalCLIAction(version.Program+"-server"+programPostfix, dataDir, os.Args)),
 		cmds.NewAgentCommand(internalCLIAction(version.Program+"-agent"+programPostfix, dataDir, os.Args)),
 		cmds.NewKubectlCommand(externalCLIAction("kubectl", dataDir)),
@@ -85,7 +85,10 @@ func main() {
 			certCommand,
 			certCommand,
 		),
-		cmds.NewCompletionCommand(internalCLIAction(version.Program+"-completion", dataDir, os.Args)),
+		cmds.NewCompletionCommand(
+			internalCLIAction(version.Program+"-completion", dataDir, os.Args),
+			internalCLIAction(version.Program+"-completion", dataDir, os.Args),
+		),
 	}
 
 	cmds.MustRun(app, os.Args)
@@ -179,7 +182,7 @@ func runCLIs(dataDir string) bool {
 // externalCLIAction returns a function that will call an external binary, be used as the Action of a cli.Command.
 func externalCLIAction(cmd, dataDir string) func(cli *cli.Context) error {
 	return func(cli *cli.Context) error {
-		return externalCLI(cmd, dataDir, cli.Args())
+		return externalCLI(cmd, dataDir, cli.Args().Slice())
 	}
 }
 
@@ -214,7 +217,7 @@ func stageAndRunCLI(cli *cli.Context, cmd string, dataDir string, args []string)
 func stageAndRun(dataDir, cmd string, args []string, calledAsInternal bool) error {
 	dir, err := extract(dataDir)
 	if err != nil {
-		return pkgerrors.WithMessage(err, "extracting data")
+		return errors.WithMessage(err, "extracting data")
 	}
 	logrus.Debugf("Asset dir %s", dir)
 
@@ -310,6 +313,25 @@ func extract(dataDir string) (string, error) {
 		return "", err
 	}
 
+	// Rotate 'current' symlink into 'previous', and create a new 'current' that points
+	// at the new directory.
+	currentSymLink := filepath.Join(dataDir, "data", "current")
+	previousSymLink := filepath.Join(dataDir, "data", "previous")
+	if _, err := os.Lstat(currentSymLink); err == nil {
+		if err := os.Rename(currentSymLink, previousSymLink); err != nil {
+			return "", err
+		}
+	}
+	if err := os.Symlink(dir, currentSymLink); err != nil {
+		return "", err
+	}
+
+	// Rename the new directory into place after updating symlinks, so that the k3s binary check at the start
+	// of this function only succeeds if everything else has been completed successfully.
+	if err := os.Rename(tempDest, dir); err != nil {
+		return "", err
+	}
+
 	// Create a stable CNI bin dir and place it first in the path so that users have a
 	// consistent location to drop their own CNI plugin binaries.
 	cniPath := filepath.Join(dataDir, "data", "cni")
@@ -328,13 +350,13 @@ func extract(dataDir string) (string, error) {
 	// Non-symlink plugins in the stable CNI bin dir will not be overwritten, to allow users to replace our
 	// CNI plugins with their own versions if they want. Note that the cni multicall binary itself is always
 	// symlinked into the stable bin dir and should not be replaced.
-	ents, err := os.ReadDir(filepath.Join(tempDest, "bin"))
+	ents, err := os.ReadDir(filepath.Join(dir, "bin"))
 	if err != nil {
 		return "", err
 	}
 	for _, ent := range ents {
-		if info, err := ent.Info(); err == nil && info.Mode()&fs.ModeSymlink != 0 {
-			if target, err := os.Readlink(filepath.Join(tempDest, "bin", ent.Name())); err == nil && target == "cni" {
+		if info, err := ent.Info(); err == nil && info.Mode()&os.ModeSymlink == os.ModeSymlink {
+			if target, err := os.Readlink(filepath.Join(dir, "bin", ent.Name())); err == nil && target == "cni" {
 				src := filepath.Join(cniPath, ent.Name())
 				// Check if plugin already exists in stable CNI bin dir
 				if info, err := os.Lstat(src); err == nil {
@@ -355,25 +377,6 @@ func extract(dataDir string) (string, error) {
 		}
 	}
 
-	// Rotate 'current' symlink into 'previous', and create a new 'current' that points
-	// at the new directory.
-	currentSymLink := filepath.Join(dataDir, "data", "current")
-	previousSymLink := filepath.Join(dataDir, "data", "previous")
-	if _, err := os.Lstat(currentSymLink); err == nil {
-		if err := os.Rename(currentSymLink, previousSymLink); err != nil {
-			return "", err
-		}
-	}
-	if err := os.Symlink(dir, currentSymLink); err != nil {
-		return "", err
-	}
-
-	// Rename the new directory into place after updating symlinks, so that the k3s binary check at the start
-	// of this function only succeeds if everything else has been completed successfully.
-	if err := os.Rename(tempDest, dir); err != nil {
-		return "", err
-	}
-
 	return dir, nil
 }
 
@@ -388,7 +391,7 @@ func extract(dataDir string) (string, error) {
 func findCriConfig(dataDir string) string {
 	searchList := []string{filepath.Join(dataDir, "agent", criDefaultConfigPath)}
 
-	if homeDataDir, err := resolvehome.Resolve(datadir.DefaultHomeDataDir); err == nil {
+	if homeDataDir, err := home.Resolve(datadir.DefaultHomeDataDir); err == nil {
 		searchList = append(searchList, filepath.Join(homeDataDir, "agent", criDefaultConfigPath))
 	} else {
 		logrus.Warnf("Failed to resolve user home directory: %s", err)

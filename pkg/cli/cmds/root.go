@@ -8,7 +8,8 @@ import (
 	"runtime"
 
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/urfave/cli"
+	"github.com/sirupsen/logrus"
+	"github.com/urfave/cli/v2"
 )
 
 var (
@@ -17,7 +18,7 @@ var (
 		Name:        "debug",
 		Usage:       "(logging) Turn on debug logs",
 		Destination: &Debug,
-		EnvVar:      version.ProgramUpper + "_DEBUG",
+		EnvVars:     []string{version.ProgramUpper + "_DEBUG"},
 	}
 	PreferBundledBin = &cli.BoolFlag{
 		Name:  "prefer-bundled-bin",
