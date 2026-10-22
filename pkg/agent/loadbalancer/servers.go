@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 type HealthCheckFunc func() HealthCheckResult
