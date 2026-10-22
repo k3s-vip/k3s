@@ -7,74 +7,82 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/sirupsen/logrus"
-	"github.com/spegel-org/spegel/pkg/routing"
+	routing "github.com/spegel-org/spegel/pkg/routing/libp2p"
 	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/util/wait"
 	nodeutil "k8s.io/kubernetes/pkg/controller/util/node"
 )
 
+type Bootstrapper interface {
+	routing.Bootstrapper
+	Run(ctx context.Context, id peer.AddrInfo) error
+}
+
 // explicit interface checks
-var _ routing.Bootstrapper = &selfBootstrapper{}
-var _ routing.Bootstrapper = &notSelfBootstrapper{}
-var _ routing.Bootstrapper = &agentBootstrapper{}
-var _ routing.Bootstrapper = &serverBootstrapper{}
-var _ routing.Bootstrapper = &chainingBootstrapper{}
+var _ Bootstrapper = &selfBootstrapper{}
+var _ Bootstrapper = &notSelfBootstrapper{}
+var _ Bootstrapper = &agentBootstrapper{}
+var _ Bootstrapper = &serverBootstrapper{}
+var _ Bootstrapper = &chainingBootstrapper{}
 
 type selfBootstrapper struct {
-	id *peer.AddrInfo
+	id atomic.Pointer[peer.AddrInfo]
 }
 
 // NewSelfBootstrapper returns a stub p2p bootstrapper that just returns its own ID
-func NewSelfBootstrapper() routing.Bootstrapper {
+func NewSelfBootstrapper() Bootstrapper {
 	return &selfBootstrapper{}
 }
 
 func (s *selfBootstrapper) Run(ctx context.Context, id peer.AddrInfo) error {
-	s.id = &id
+	s.id.Store(&id)
 	return waitForDone(ctx)
 }
 
 func (s *selfBootstrapper) Get(ctx context.Context) ([]peer.AddrInfo, error) {
-	if s.id == nil {
+	id := s.id.Load()
+	if id == nil {
 		return nil, errors.New("p2p peer not ready")
 	}
-	return []peer.AddrInfo{*s.id}, nil
+	return []peer.AddrInfo{*id}, nil
 }
 
 type notSelfBootstrapper struct {
-	id *peer.AddrInfo
-	b  routing.Bootstrapper
+	id atomic.Pointer[peer.AddrInfo]
+	b  Bootstrapper
 }
 
 // NewNotSelfBootstrapper wraps an existing bootstrapper,
 // and will never return a list of peers containing only itself.
 // This is best used to prevent the spegel router from considering
 // itself as "Ready" when it has no peers.
-func NewNotSelfBootstrapper(b routing.Bootstrapper) routing.Bootstrapper {
+func NewNotSelfBootstrapper(b Bootstrapper) Bootstrapper {
 	return &notSelfBootstrapper{
 		b: b,
 	}
 }
 
 func (ns *notSelfBootstrapper) Run(ctx context.Context, id peer.AddrInfo) error {
-	ns.id = &id
+	ns.id.Store(&id)
 	return ns.b.Run(ctx, id)
 }
 
 func (ns *notSelfBootstrapper) Get(ctx context.Context) ([]peer.AddrInfo, error) {
 	peers, err := ns.b.Get(ctx)
-	if err == nil && len(peers) == 1 && ns.id != nil && peers[0].ID == ns.id.ID {
+	id := ns.id.Load()
+	if err == nil && len(peers) == 1 && id != nil && peers[0].ID == id.ID {
 		return nil, nil
 	}
 	return peers, err
@@ -86,11 +94,11 @@ type agentBootstrapper struct {
 	clientCert string
 	clientKey  string
 	kubeConfig string
-	info       *clientaccess.Info
+	info       atomic.Pointer[clientaccess.Info]
 }
 
 // NewAgentBootstrapper returns a p2p bootstrapper that retrieves a peer address from its server
-func NewAgentBootstrapper(server, token, dataDir string) routing.Bootstrapper {
+func NewAgentBootstrapper(server, token, dataDir string) Bootstrapper {
 	return &agentBootstrapper{
 		clientCert: filepath.Join(dataDir, "agent", "client-kubelet.crt"),
 		clientKey:  filepath.Join(dataDir, "agent", "client-kubelet.key"),
@@ -101,13 +109,16 @@ func NewAgentBootstrapper(server, token, dataDir string) routing.Bootstrapper {
 }
 
 func (c *agentBootstrapper) Run(ctx context.Context, id peer.AddrInfo) error {
+	if len(id.Addrs) == 0 {
+		return errors.New("local peer has no addresses")
+	}
 	if c.server != "" && c.token != "" {
 		withCert := clientaccess.WithClientCertificate(c.clientCert, c.clientKey)
 		info, err := clientaccess.ParseAndValidateToken(c.server, c.token, withCert)
 		if err != nil {
 			return errors.WithMessage(err, "failed to validate join token")
 		}
-		c.info = info
+		c.info.Store(info)
 	}
 
 	client, err := util.GetClientSet(c.kubeConfig)
@@ -149,11 +160,12 @@ func (c *agentBootstrapper) Get(ctx context.Context) ([]peer.AddrInfo, error) {
 		return nil, errors.New("cannot get addresses without server and token")
 	}
 
-	if c.info == nil {
+	info := c.info.Load()
+	if info == nil {
 		return nil, errors.New("client not ready")
 	}
 
-	addr, err := c.info.Get("/v1-"+version.Program+"/p2p", clientaccess.WithHeader("Accept", "application/json"))
+	addr, err := info.Get("/v1-"+version.Program+"/p2p", clientaccess.WithHeader("Accept", "application/json"))
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +191,7 @@ type serverBootstrapper struct {
 }
 
 // NewServerBootstrapper returns a p2p bootstrapper that returns an address from the Kubernetes node list
-func NewServerBootstrapper(controlConfig *config.Control) routing.Bootstrapper {
+func NewServerBootstrapper(controlConfig *config.Control) Bootstrapper {
 	return &serverBootstrapper{
 		controlConfig: controlConfig,
 	}
@@ -237,14 +249,14 @@ func (s *serverBootstrapper) Get(ctx context.Context) ([]peer.AddrInfo, error) {
 }
 
 type chainingBootstrapper struct {
-	bootstrappers []routing.Bootstrapper
+	bootstrappers []Bootstrapper
 }
 
 // NewChainingBootstrapper returns a p2p bootstrapper that passes through to a list of bootstrappers.
 // Addressess are returned from the first bootstrapper that returns successfully, to prevent infinite
 // recursion if this chains through an agentBootstrapper when the server URL is set to an external
 // loadbalancer that points back at this node.
-func NewChainingBootstrapper(bootstrappers ...routing.Bootstrapper) routing.Bootstrapper {
+func NewChainingBootstrapper(bootstrappers ...Bootstrapper) Bootstrapper {
 	return &chainingBootstrapper{
 		bootstrappers: bootstrappers,
 	}

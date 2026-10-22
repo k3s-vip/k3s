@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -46,23 +47,18 @@ func Connection(ctx context.Context, address string) (*grpc.ClientConn, error) {
 // or when the context is cancelled.
 func WaitForService(ctx context.Context, address string, service string) error {
 	first := true
-	for {
+	return wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
 		conn, err := Connection(ctx, address)
 		if err == nil {
 			conn.Close()
-			break
+			logrus.Infof("%s is now running", service)
+			return true, nil
 		}
 		if first {
 			first = false
 		} else {
 			logrus.Infof("Waiting for %s startup: %v", service, err)
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
-	}
-	logrus.Infof("%s is now running", service)
-	return nil
+		return false, nil
+	})
 }
