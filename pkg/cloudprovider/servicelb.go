@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/rancher/wrangler/v3/pkg/condition"
 	coreclient "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
@@ -25,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/cloud-provider/app"
 	servicehelper "k8s.io/cloud-provider/service/helpers"
