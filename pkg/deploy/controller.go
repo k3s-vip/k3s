@@ -15,12 +15,13 @@ import (
 	"sync"
 	"time"
 
-	apisv1 "github.com/k3s-io/api/k3s.cattle.io/v1"
-	controllersv1 "github.com/k3s-io/api/pkg/generated/controllers/k3s.cattle.io/v1"
+	apisv1 "github.com/k3s-io/k3s/pkg/apis/k3s.cattle.io/v1"
+	controllersv1 "github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io/v1"
 	"github.com/k3s-io/k3s/pkg/agent/util"
 	pkgutil "github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/k3s/pkg/util/logger"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/rancher/wrangler/v3/pkg/apply"
 	"github.com/rancher/wrangler/v3/pkg/kv"
 	"github.com/rancher/wrangler/v3/pkg/objectset"
@@ -44,10 +45,11 @@ const (
 	gvkSep         = ";"
 )
 
-// epoch is the fixed mtime that some immutable filesystems (e.g. NixOS /nix/store)
-// pin all files to. Such files never register content changes via mtime, so they
-// must always be re-checked against the Addon checksum.
-var epoch = time.Unix(0, 0)
+// immutableModTime is the timestamp before which files,
+// based on their modtime, are considered to come from
+// an immutable filesystem (e.g. NixOS /nix/store).
+// Such files are always re-checked against the Addon checksum.
+var immutableModTime = time.Unix(1, 0)
 
 // WatchFiles sets up an OnChange callback to start a periodic goroutine to watch files for changes once the controller has started up.
 func WatchFiles(ctx context.Context, client kubernetes.Interface, apply apply.Apply, addons controllersv1.AddonController, disables map[string]bool, bases ...string) error {
@@ -96,18 +98,14 @@ type watchedFile struct {
 func (w *watcher) start(ctx context.Context, client kubernetes.Interface) {
 	w.recorder = pkgutil.BuildControllerEventRecorder(logger.NewContext(ctx, ControllerName), client, ControllerName, metav1.NamespaceSystem)
 	force := true
-	for {
+	wait.PollUntilContextCancel(ctx, 15*time.Second, true, func(_ context.Context) (bool, error) {
 		if err := w.listFiles(force); err == nil {
 			force = false
 		} else {
 			logrus.Errorf("Failed to process config: %v", err)
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(15 * time.Second):
-		}
-	}
+		return false, nil
+	})
 }
 
 // listFiles calls listFilesIn on a list of paths.
@@ -161,7 +159,7 @@ func (w *watcher) listFilesIn(base string, force bool) error {
 			continue
 		}
 		modTime := files[path].ModTime()
-		if !force && !modTime.Equal(epoch) && modTime.Equal(w.modTime[path]) {
+		if !force && modTime.After(immutableModTime) && modTime.Equal(w.modTime[path]) {
 			continue
 		}
 		if err := w.deploy(path, !force); err != nil {

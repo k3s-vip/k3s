@@ -31,7 +31,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/util/mux"
 	"github.com/k3s-io/k3s/pkg/util/permissions"
-	"github.com/k3s-io/k3s/pkg/version"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/vpn"
 
 	systemd "github.com/coreos/go-systemd/v22/daemon"
@@ -42,7 +42,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	kubeapiserverflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/controlplane/apiserver/options"
@@ -80,7 +79,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	}
 
 	klog.EnableContextualLogging(true)
-	ctx := logger.NewContext(signals.SetupSignalContext(), version.Program)
+	ctx := logger.NewContext(signals.SetupSignalContext(), "server")
 	wg := &sync.WaitGroup{}
 
 	// If exiting due to an error, ensure that contexts are cancelled so that the
@@ -158,6 +157,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	serverConfig.ControlConfig.KubeConfigOutput = cfg.KubeConfigOutput
 	serverConfig.ControlConfig.KubeConfigMode = cfg.KubeConfigMode
 	serverConfig.ControlConfig.KubeConfigGroup = cfg.KubeConfigGroup
+	serverConfig.ControlConfig.KubeConfigName = cfg.KubeConfigName
 	serverConfig.ControlConfig.HelmJobImage = cfg.HelmJobImage
 	serverConfig.ControlConfig.Rootless = cfg.Rootless
 	serverConfig.ControlConfig.ServiceLBNamespace = cfg.ServiceLBNamespace
@@ -467,7 +467,6 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	if !serverConfig.ControlConfig.DisableHelmController {
 		argsMap := map[string]string{}
 		if serverConfig.ControlConfig.HelmJobImage != "" {
-			logrus.Warnf("--helm-job-image is deprecated, please use --helm-controller-arg=default-job-image=%s", serverConfig.ControlConfig.HelmJobImage)
 			argsMap["default-job-image"] = serverConfig.ControlConfig.HelmJobImage
 		}
 
@@ -533,8 +532,6 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 			}
 		}
 	}
-
-	logrus.Info("Starting " + version.Program + " " + app.App.Version)
 
 	notifySocket := os.Getenv("NOTIFY_SOCKET")
 	os.Unsetenv("NOTIFY_SOCKET")
@@ -668,15 +665,19 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 
 	go func() {
 		if !serverConfig.ControlConfig.DisableETCD {
-			<-executor.ETCDReadyChan()
+			if err := executor.ETCDReadyChan().Wait(ctx); err != nil {
+				return
+			}
 			logrus.Info("ETCD server is now running")
 		}
 		if !serverConfig.ControlConfig.DisableAPIServer {
-			<-executor.APIServerReadyChan()
+			if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
+				return
+			}
 			logrus.Info("Kube API server is now running")
 			serverConfig.ControlConfig.Runtime.StartupHooksWg.Wait()
 		}
-		logrus.Info(version.Program + " is up and running")
+		logrus.Info("k3s is up and running")
 		os.Setenv("NOTIFY_SOCKET", notifySocket)
 		systemd.SdNotify(true, "READY=1\n")
 	}()
