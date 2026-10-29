@@ -31,6 +31,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/util/mux"
 	"github.com/k3s-io/k3s/pkg/util/permissions"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/vpn"
 
 	systemd "github.com/coreos/go-systemd/v22/daemon"
@@ -41,7 +42,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	kubeapiserverflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/controlplane/apiserver/options"
@@ -157,6 +157,7 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 	serverConfig.ControlConfig.KubeConfigOutput = cfg.KubeConfigOutput
 	serverConfig.ControlConfig.KubeConfigMode = cfg.KubeConfigMode
 	serverConfig.ControlConfig.KubeConfigGroup = cfg.KubeConfigGroup
+	serverConfig.ControlConfig.KubeConfigName = cfg.KubeConfigName
 	serverConfig.ControlConfig.HelmJobImage = cfg.HelmJobImage
 	serverConfig.ControlConfig.Rootless = cfg.Rootless
 	serverConfig.ControlConfig.ServiceLBNamespace = cfg.ServiceLBNamespace
@@ -664,11 +665,15 @@ func run(app *cli.Context, cfg *cmds.Server, leaderControllers server.CustomCont
 
 	go func() {
 		if !serverConfig.ControlConfig.DisableETCD {
-			<-executor.ETCDReadyChan()
+			if err := executor.ETCDReadyChan().Wait(ctx); err != nil {
+				return
+			}
 			logrus.Info("ETCD server is now running")
 		}
 		if !serverConfig.ControlConfig.DisableAPIServer {
-			<-executor.APIServerReadyChan()
+			if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
+				return
+			}
 			logrus.Info("Kube API server is now running")
 			serverConfig.ControlConfig.Runtime.StartupHooksWg.Wait()
 		}

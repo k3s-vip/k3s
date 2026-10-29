@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/k3s-io/k3s/pkg/secretsencrypt"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	coreclient "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
@@ -16,7 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/pager"

@@ -34,6 +34,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/spegel"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
@@ -159,7 +160,9 @@ func run(ctx context.Context, cfg cmds.Agent, proxy proxy.Proxy) error {
 	}
 
 	go func() {
-		<-executor.APIServerReadyChan()
+		if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
+			return
+		}
 		if err := startNetwork(ctx, &sync.WaitGroup{}, nodeConfig); err != nil {
 			signals.RequestShutdown(errors.WithMessage(err, "failed to start networking"))
 			return
@@ -343,21 +346,15 @@ func createProxyAndValidateToken(ctx context.Context, cfg *cmds.Agent) (proxy.Pr
 		clientaccess.WithClientCertificate(clientKubeletCert, clientKubeletKey),
 	}
 
-	for {
+	return proxy, wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
 		newToken, err := clientaccess.ParseAndValidateToken(proxy.SupervisorURL(), cfg.Token, options...)
 		if err != nil {
 			logrus.Errorf("Failed to validate connection to cluster at %s: %v", cfg.ServerURL, err)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(2 * time.Second):
-			}
-			continue
+			return false, nil
 		}
 		cfg.Token = newToken.String()
-		break
-	}
-	return proxy, nil
+		return true, nil
+	})
 }
 
 // configureNode waits for the node object to be created, and if/when it does,

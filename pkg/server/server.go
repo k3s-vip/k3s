@@ -29,6 +29,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/util/home"
 	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/util/permissions"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 
 	helmchart "github.com/k3s-io/helm-controller/pkg/controllers/chart"
@@ -39,7 +40,6 @@ import (
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 )
 
@@ -98,13 +98,11 @@ func StartServer(ctx context.Context, wg *sync.WaitGroup, config *Config, cfg *c
 }
 
 func startOnAPIServerReady(ctx context.Context, config *Config) {
-	select {
-	case <-ctx.Done():
+	if err := executor.APIServerReadyChan().Wait(ctx); err != nil {
 		return
-	case <-executor.APIServerReadyChan():
-		if err := runControllers(ctx, config); err != nil {
-			logrus.Fatalf("failed to start controllers: %v", err)
-		}
+	}
+	if err := runControllers(ctx, config); err != nil {
+		logrus.Fatalf("failed to start controllers: %v", err)
 	}
 }
 
@@ -431,7 +429,7 @@ func writeKubeConfig(certs string, config *Config) error {
 		}
 	}
 
-	if err = clientaccess.WriteClientKubeConfig(kubeConfig, url, config.ControlConfig.Runtime.ServerCA, config.ControlConfig.Runtime.ClientAdminCert,
+	if err = clientaccess.WriteClientKubeConfig(kubeConfig, config.ControlConfig.KubeConfigName, url, config.ControlConfig.Runtime.ServerCA, config.ControlConfig.Runtime.ClientAdminCert,
 		config.ControlConfig.Runtime.ClientAdminKey); err == nil {
 		logrus.Infof("Wrote kubeconfig %s", kubeConfig)
 	} else {
@@ -590,19 +588,12 @@ func setClusterDNSConfig(ctx context.Context, config *Config, configMap v1.Confi
 			"clusterDomain": clusterDomain,
 		},
 	}
-	for {
-		_, err = configMap.Create(c)
-		if err == nil {
-			logrus.Infof("Cluster dns configmap has been set successfully")
-			break
+	return wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+		if _, err := configMap.Create(c); err != nil {
+			logrus.Infof("Waiting for control-plane dns startup: %v", err)
+			return false, nil
 		}
-		logrus.Infof("Waiting for control-plane dns startup: %v", err)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
-	}
-	return nil
+		logrus.Infof("Cluster dns configmap has been set successfully")
+		return true, nil
+	})
 }
