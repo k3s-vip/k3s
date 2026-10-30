@@ -22,9 +22,9 @@ import (
 	"github.com/k3s-io/k3s/pkg/executor/embed"
 	kubectl2 "github.com/k3s-io/k3s/pkg/kubectl"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	crictl2 "github.com/kubernetes-sigs/cri-tools/cmd/crictl"
 	"github.com/moby/sys/reexec"
 	"github.com/urfave/cli/v2"
-	crictl2 "sigs.k8s.io/cri-tools/cmd/crictl"
 )
 
 func init() {
