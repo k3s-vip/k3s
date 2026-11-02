@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/sirupsen/logrus"
 	apinet "k8s.io/apimachinery/pkg/util/net"
-	"k8s.io/apimachinery/pkg/util/wait"
 	netutils "k8s.io/utils/net"
 )
 
