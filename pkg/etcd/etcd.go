@@ -30,6 +30,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/k3s/pkg/util/mux"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	kine "github.com/k3s-io/kine/pkg/app"
 	"github.com/k3s-io/kine/pkg/client"
@@ -54,7 +55,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 const (
@@ -323,9 +323,7 @@ func (e *ETCD) Reset(ctx context.Context, wg *sync.WaitGroup, rebootstrap func()
 		defer wg.Done()
 		if executor.IsSelfHosted() {
 			// if the executor requires cri/kubelet to be up to run etcd, wait for container runtime
-			select {
-			case <-executor.CRIReadyChan():
-			case <-ctx.Done():
+			if err := executor.CRIReadyChan().Wait(ctx); err != nil {
 				return
 			}
 		}
@@ -477,9 +475,7 @@ func (e *ETCD) Start(ctx context.Context, wg *sync.WaitGroup, clientAccessInfo *
 		defer wg.Done()
 		if executor.IsSelfHosted() {
 			// if the executor requires cri/kubelet to be up to run etcd, wait for container runtime
-			select {
-			case <-executor.CRIReadyChan():
-			case <-ctx.Done():
+			if err := executor.CRIReadyChan().Wait(ctx); err != nil {
 				return
 			}
 		}
@@ -1141,9 +1137,7 @@ func (e *ETCD) RemovePeer(ctx context.Context, name, address string, allowSelfRe
 func (e *ETCD) manageLearners(ctx context.Context) {
 	if executor.IsSelfHosted() {
 		// if the executor requires cri/kubelet to be up to run etcd, wait for container runtime
-		select {
-		case <-executor.CRIReadyChan():
-		case <-ctx.Done():
+		if err := executor.CRIReadyChan().Wait(ctx); err != nil {
 			return
 		}
 	}
