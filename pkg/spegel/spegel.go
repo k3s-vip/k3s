@@ -26,6 +26,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/util/mux"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -42,7 +43,6 @@ import (
 	routinglibp2p "github.com/spegel-org/spegel/pkg/routing/libp2p"
 	"github.com/spegel-org/spegel/pkg/web"
 	"golang.org/x/sync/errgroup"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/component-base/metrics/legacyregistry"
 )
 
