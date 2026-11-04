@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	apisv1 "github.com/k3s-io/api/k3s.cattle.io/v1"
-	clientsetfake "github.com/k3s-io/api/pkg/generated/clientset/versioned/fake"
+	apisv1 "github.com/k3s-io/k3s/pkg/apis/k3s.cattle.io/v1"
+	clientsetfake "github.com/k3s-io/k3s/pkg/generated/clientset/versioned/fake"
 	applyfake "github.com/rancher/wrangler/v3/pkg/apply/fake"
 	genericfake "github.com/rancher/wrangler/v3/pkg/generic/fake"
 	"go.uber.org/mock/gomock"
