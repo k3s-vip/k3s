@@ -18,10 +18,10 @@ import (
 	"github.com/k3s-io/k3s/pkg/nodepassword"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/mux"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // start starts the database, unless a cluster reset has been requested, in which case
