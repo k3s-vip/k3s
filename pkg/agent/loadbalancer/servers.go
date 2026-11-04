@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 type HealthCheckFunc func() HealthCheckResult
@@ -463,6 +463,14 @@ func (sc *serverConn) Close() error {
 
 	delete(sc.server.connections, sc)
 	return sc.Conn.Close()
+}
+
+func (sc *serverConn) CloseRead() error {
+	return sc.Close()
+}
+
+func (sc *serverConn) CloseWrite() error {
+	return sc.Close()
 }
 
 // runHealthChecks periodically health-checks all servers and updates metrics
