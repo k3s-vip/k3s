@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	k3s "github.com/k3s-io/api/k3s.cattle.io/v1"
+	k3s "github.com/k3s-io/k3s/pkg/apis/k3s.cattle.io/v1"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/etcd/s3"
@@ -254,6 +254,11 @@ func (e *ETCD) snapshot(ctx context.Context) (_ *managed.SnapshotResult, rerr er
 	if status.IsLearner {
 		logrus.Warnf("Unable to take snapshot: not supported for learner")
 		return nil, nil
+	}
+	_, err = e.client.Defragment(ctx, endpoints[0])
+	if err != nil {
+		logrus.Warnf("Unable to defragment etcd: %v", err)
+		return nil, errors.WithMessage(err, "failed to defragment etcd for snapshot")
 	}
 
 	snapshotDir, err := snapshotDir(e.config, true)

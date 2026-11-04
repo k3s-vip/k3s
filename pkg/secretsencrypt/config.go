@@ -19,7 +19,7 @@ import (
 	"github.com/prometheus/common/model"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/k3s-io/api/pkg/generated/clientset/versioned/scheme"
+	"github.com/k3s-io/k3s/pkg/generated/clientset/versioned/scheme"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"

@@ -18,7 +18,7 @@ PKG_CRI_DOCKERD="github.com/Mirantis/cri-dockerd"
 PKG_ETCD="go.etcd.io/etcd"
 PKG_HELM_CONTROLLER="github.com/k3s-io/helm-controller"
 
-buildDate=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+buildDate=2026-10-27T12:02:52Z
 
 VERSIONFLAGS="
     -X ${PKG}/pkg/version.Version=${VERSION}
@@ -34,26 +34,26 @@ VERSIONFLAGS="
     -X ${PKG_K8S_BASE}/version.gitTreeState=${TREE_STATE}
     -X ${PKG_K8S_BASE}/version.buildDate=${buildDate}
 
-    -X ${PKG_CRICTL}/version.Version=${VERSION_CRICTL}
+    -X ${PKG_CRICTL}/version.Version=${VERSION_CRICTL%%-*}
 
-    -X ${PKG_CONTAINERD}/version.Version=${VERSION_CONTAINERD}
+    -X ${PKG_CONTAINERD}/version.Version=${VERSION_CONTAINERD%%-*}
     -X ${PKG_CONTAINERD}/version.Package=${PKG_CONTAINERD_K3S}
 
-    -X ${PKG_CNI_PLUGINS}/pkg/utils/buildversion.BuildVersion=${VERSION_CNIPLUGINS}
+    -X ${PKG_CNI_PLUGINS}/pkg/utils/buildversion.BuildVersion=${VERSION_CNIPLUGINS%%-*}
     -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Program=flannel
-    -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Version=${VERSION_FLANNEL_PLUGIN}+${VERSION_FLANNEL}
+    -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Version=${VERSION_FLANNEL_PLUGIN%%-*}+${VERSION_FLANNEL%%-*}
     -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.Commit=HEAD
     -X ${PKG_CNI_PLUGINS}/plugins/meta/flannel.buildDate=${buildDate}
 
-    -X ${PKG_KUBE_ROUTER}/pkg/version.Version=${VERSION_KUBE_ROUTER}
+    -X ${PKG_KUBE_ROUTER}/pkg/version.Version=${VERSION_KUBE_ROUTER%%-*}
     -X ${PKG_KUBE_ROUTER}/pkg/version.BuildDate=${buildDate}
 
-    -X ${PKG_CRI_DOCKERD}/cmd/version.Version=${VERSION_CRI_DOCKERD}
+    -X ${PKG_CRI_DOCKERD}/cmd/version.Version=${VERSION_CRI_DOCKERD%%-*}
     -X ${PKG_CRI_DOCKERD}/cmd/version.GitCommit=HEAD
     -X ${PKG_CRI_DOCKERD}/cmd/version.BuildTime=${buildDate}
 
     -X ${PKG_ETCD}/api/v3/version.GitSHA=HEAD
-    
+    -X google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=ignore
     -X ${PKG_HELM_CONTROLLER}/pkg/controllers/chart.DefaultJobImage=rancher/klipper-helm:${VERSION_HELM_JOB}
 "
 if [ -n "${DEBUG}" ]; then
@@ -98,11 +98,6 @@ case ${OS} in
     exit 1
     ;;
 esac
-
-if [ -n "${GOCOVER}" ]; then
-    BLDFLAGS="-cover"
-    TAGS="cover $TAGS"
-fi
 
 mkdir -p bin
 
@@ -155,8 +150,8 @@ cleanup() {
 }
 
 echo Building k3s
-cp -av manifests/* pkg/deploy/embed/
-cp -av build/static/* pkg/static/embed/
+embedFS=pkg/deploy/embed;rm -rf $embedFS;cp -av manifests $embedFS
+embedFS=pkg/static/embed;rm -rf $embedFS;cp -av build/static $embedFS
 CGO_CFLAGS="-DSQLITE_ENABLE_DBSTAT_VTAB=1 -DSQLITE_USE_ALLOCA=1" \
 CGO_ENABLED=1 "${GO}" build $BLDFLAGS -tags "$TAGS" -buildvcs=false -gcflags="all=${GCFLAGS}" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC" -o bin/k3s${BINARY_POSTFIX} ./cmd/server
 
@@ -165,11 +160,10 @@ for i in "${k3s_binaries[@]}"; do
 done
 
 export GOPATH=$(pwd)/build
-REPLACEMENTS=$(go list -m --mod=readonly -f '{{ if .Replace }}-replace={{.Path}}={{.Replace.Path}}@{{.Replace.Version}}{{end}}' all | grep '=golang.org/x/')
 
 echo Building cni
 pushd ${PLUGINS_DIR}
-go mod edit ${REPLACEMENTS}; go mod tidy; [ -d vendor ] && go mod vendor
+go mod tidy; [ -d vendor ] && go mod vendor
 CGO_ENABLED=0 "${GO}" build -tags "$TAGS" -gcflags="all=${GCFLAGS}" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC" -o bin/cni${BINARY_POSTFIX}
 popd
 cp -vf ${PLUGINS_DIR}/bin/cni${BINARY_POSTFIX} ./bin/
@@ -179,7 +173,7 @@ case ${OS} in
     echo Building containerd-shim
     pushd ${CONTAINERD_DIR}
     rm -rf bin
-    go mod edit ${REPLACEMENTS}; go mod tidy; [ -d vendor ] && go mod vendor
+    go mod tidy; [ -d vendor ] && go mod vendor
     TAGS="${TAGS/netcgo/netgo}"
     CGO_ENABLED=1 "${GO}" build -tags "$TAGS" -gcflags="all=${GCFLAGS}" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC" -o bin/containerd-shim-runc-v2 ./cmd/containerd-shim-runc-v2
     popd
@@ -189,7 +183,7 @@ case ${OS} in
     pushd ${RUNC_DIR}
     rm -f runc
     COMMIT=$(git describe --dirty --long --always)
-    go mod edit ${REPLACEMENTS}; go mod tidy; [ -d vendor ] && go mod vendor
+    go mod tidy; [ -d vendor ] && go mod vendor
     make COMMIT="${COMMIT}" GO="${GO}" EXTRA_FLAGS="-gcflags=\"all=${GCFLAGS}\"" EXTRA_LDFLAGS="$LDFLAGS" BUILDTAGS="$RUNC_TAGS" $RUNC_STATIC
     popd
     cp -vf ${RUNC_DIR}/runc ./bin/
@@ -203,7 +197,7 @@ case ${OS} in
     echo Building containerd-shim-runhcs-v1
     pushd ${HCSSHIM_DIR}
     rm -rf bin
-    go mod edit ${REPLACEMENTS}; go mod tidy; [ -d vendor ] && go mod vendor
+    go mod tidy; [ -d vendor ] && go mod vendor
     TAGS="${TAGS/netcgo/netgo}"
     CGO_ENABLED=0 "${GO}" build -tags "$TAGS" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC" -o bin/containerd-shim-runhcs-v1${BINARY_POSTFIX} ./cmd/containerd-shim-runhcs-v1
     CGO_ENABLED=0 "${GO}" build -tags "$TAGS" -ldflags "$VERSIONFLAGS $LDFLAGS $STATIC" -o bin/runhcs${BINARY_POSTFIX} ./cmd/runhcs

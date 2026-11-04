@@ -21,48 +21,18 @@ import (
 
 type HostConfigs map[string]templates.HostConfig
 
-type templateGeneration struct {
-	version  int
-	filename string
-	base     string
-}
-
-var templateGenerations = []templateGeneration{
-	{
-		version:  3,
-		filename: "config-v3.toml.tmpl",
-		base:     templates.ContainerdConfigTemplateV3,
-	},
-	{
-		version:  2,
-		filename: "config.toml.tmpl",
-		base:     templates.ContainerdConfigTemplate,
-	},
-}
-
 // writeContainerdConfig renders and saves config.toml from the filled template
 func writeContainerdConfig(cfg *config.Node, containerdConfig templates.ContainerdConfig) error {
-	// use v3 template by default
-	userTemplate := templates.ContainerdConfigTemplateV3
-	baseTemplate := templates.ContainerdConfigTemplateV3
-	cfg.Containerd.ConfigVersion = 3
-
-	// check for user templates
-	for _, tg := range templateGenerations {
-		path := filepath.Join(cfg.Containerd.Template, tg.filename)
-		b, err := os.ReadFile(path)
-		if err == nil {
-			logrus.Infof("Using containerd config template at %s", path)
-			baseTemplate = tg.base
-			userTemplate = string(b)
-			cfg.Containerd.ConfigVersion = tg.version
-			break
-		} else if !os.IsNotExist(err) {
-			return err
-		}
+	containerdTemplate := templates.ContainerdConfigTemplate
+	containerdTemplateBytes, err := os.ReadFile(cfg.Containerd.Template)
+	if err == nil {
+		logrus.Infof("Using containerd template at %s", cfg.Containerd.Template)
+		containerdTemplate = string(containerdTemplateBytes)
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 
-	parsedTemplate, err := templates.ParseTemplateFromConfig(userTemplate, baseTemplate, containerdConfig)
+	parsedTemplate, err := templates.ParseTemplateFromConfig(containerdTemplate, containerdConfig)
 	if err != nil {
 		return err
 	}
