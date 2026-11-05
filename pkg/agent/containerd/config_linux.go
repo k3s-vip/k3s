@@ -21,7 +21,7 @@ import (
 	"github.com/pdtpartners/nix-snapshotter/pkg/nix"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
-	"k8s.io/cri-client/pkg/util"
+	"k8s.io/kubernetes/pkg/kubelet/util"
 )
 
 const (

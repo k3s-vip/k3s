@@ -5,7 +5,6 @@ package agent
 import (
 	"errors"
 	"net"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -91,21 +90,20 @@ func kubeletArgsAndConfig(cfg *config.Agent) (map[string]string, *kubeletconfig.
 		// used to expose this as a --containerd flag, but stopped registering it in v1.37, and
 		// does not pass its own runtime endpoint through.
 		if strings.Contains(cfg.RuntimeSocket, "containerd") {
-			runtimeWithoutPrefix := strings.TrimPrefix(cfg.RuntimeSocket, socketPrefix)
-			os.Setenv("CADVISOR_CONTAINERD_ENDPOINT", runtimeWithoutPrefix)
+			argsMap["containerd"] = cfg.RuntimeSocket
 		}
 		// cadvisor wants the containerd CRI socket without the prefix, but kubelet wants it with the prefix
 		if strings.HasPrefix(cfg.RuntimeSocket, socketPrefix) {
-			defaultConfig.ContainerRuntimeEndpoint = cfg.RuntimeSocket
+			argsMap["container-runtime-endpoint"] = cfg.RuntimeSocket
 		} else {
-			defaultConfig.ContainerRuntimeEndpoint = socketPrefix + cfg.RuntimeSocket
+			argsMap["container-runtime-endpoint"] = socketPrefix + cfg.RuntimeSocket
 		}
 	}
 	if cfg.ImageServiceSocket != "" {
 		if strings.HasPrefix(cfg.ImageServiceSocket, socketPrefix) {
-			defaultConfig.ImageServiceEndpoint = cfg.ImageServiceSocket
+			argsMap["image-service-endpoint"] = cfg.ImageServiceSocket
 		} else {
-			defaultConfig.ImageServiceEndpoint = socketPrefix + cfg.ImageServiceSocket
+			argsMap["image-service-endpoint"] = socketPrefix + cfg.ImageServiceSocket
 		}
 	}
 	if cfg.NodeName != "" {
