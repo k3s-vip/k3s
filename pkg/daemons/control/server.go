@@ -23,9 +23,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	cloudproviderapi "k8s.io/cloud-provider/api"
-	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
-	"k8s.io/kubernetes/pkg/registry/core/node"
+	node "k8s.io/kubernetes/pkg/proxy/util"
 
 	// for client metric registration
 	_ "k8s.io/component-base/metrics/prometheus/restclient"
@@ -34,7 +33,6 @@ import (
 // Prepare loads bootstrap data from the datastore and sets up the initial
 // tunnel server request handler and stub authenticator.
 func Prepare(ctx context.Context, wg *sync.WaitGroup, cfg *config.Control) error {
-	logsapi.ReapplyHandling = logsapi.ReapplyHandlingIgnoreUnchanged
 	if err := prepare(ctx, wg, cfg); err != nil {
 		return errors.WithMessage(err, "preparing server")
 	}

@@ -30,7 +30,6 @@ import (
 )
 
 func Agent(ctx context.Context, nodeConfig *daemonconfig.Node, proxy proxy.Proxy) error {
-	logsv1.ReapplyHandling = logsv1.ReapplyHandlingIgnoreUnchanged
 	logs.InitLogs()
 	defer logs.FlushLogs()
 
@@ -204,12 +203,9 @@ func defaultKubeletConfig(cfg *daemonconfig.Agent) (*kubeletconfig.KubeletConfig
 			},
 		},
 		Logging: logsv1.LoggingConfiguration{
-			Format:    "text",
-			Verbosity: logsv1.VerbosityLevel(cfg.VLevel),
-			FlushFrequency: logsv1.TimeOrMetaDuration{
-				Duration:          metav1.Duration{Duration: time.Second * 5},
-				SerializeAsString: true,
-			},
+			Format:         "text",
+			Verbosity:      logsv1.VerbosityLevel(cfg.VLevel),
+			FlushFrequency: time.Second * 5,
 		},
 	}
 
