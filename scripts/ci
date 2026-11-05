@@ -2,6 +2,9 @@
 set -e
 
 SCRIPT_DIR=$(dirname $0)
+mkdir -p build/{data,static}
+export ARCH=$(go env GOHOSTARCH) GOMODCACHE=/gomodcache GOOS=linux CC=gcc CXX=g++
+go mod tidy && go generate
 pushd $SCRIPT_DIR
 
 ./download

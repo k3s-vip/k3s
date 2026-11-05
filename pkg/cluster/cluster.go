@@ -18,9 +18,9 @@ import (
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/kine/pkg/endpoint"
 	"github.com/sirupsen/logrus"
-	"k8s.io/apimachinery/pkg/util/wait"
 	utilsnet "k8s.io/utils/net"
 )
 
@@ -91,7 +91,7 @@ func (c *Cluster) Start(ctx context.Context, wg *sync.WaitGroup) error {
 					if !c.config.EtcdDisableSnapshots {
 						// do an initial reconcile of snapshots with a fast retry until it succeeds
 						backoff := wait.Backoff{Duration: time.Second, Factor: 2, Steps: 5}
-						backoff.DelayFunc().Until(ctx, true, false, func(ctx context.Context) (bool, error) {
+						wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {
 							if err := c.managedDB.ReconcileSnapshotData(ctx); err != nil {
 								logrus.Errorf("Failed to record snapshots for cluster: %v", err)
 								return false, nil
