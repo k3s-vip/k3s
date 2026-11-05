@@ -29,6 +29,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/util/home"
 	"github.com/k3s-io/k3s/pkg/util/logger"
 	"github.com/k3s-io/k3s/pkg/util/permissions"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 
 	helmchart "github.com/k3s-io/helm-controller/pkg/controllers/chart"
@@ -39,7 +40,6 @@ import (
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 )
 
@@ -431,7 +431,7 @@ func writeKubeConfig(certs string, config *Config) error {
 		}
 	}
 
-	if err = clientaccess.WriteClientKubeConfig(kubeConfig, url, config.ControlConfig.Runtime.ServerCA, config.ControlConfig.Runtime.ClientAdminCert,
+	if err = clientaccess.WriteClientKubeConfig(kubeConfig, config.ControlConfig.KubeConfigName, url, config.ControlConfig.Runtime.ServerCA, config.ControlConfig.Runtime.ClientAdminCert,
 		config.ControlConfig.Runtime.ClientAdminKey); err == nil {
 		logrus.Infof("Wrote kubeconfig %s", kubeConfig)
 	} else {
