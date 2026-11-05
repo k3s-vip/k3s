@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/k3s-io/api/pkg/generated/controllers/k3s.cattle.io"
+	"github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io"
 	"github.com/k3s-io/kine/pkg/endpoint"
 	"github.com/rancher/wharfie/pkg/registries"
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/core"
@@ -84,7 +84,6 @@ type Containerd struct {
 	NonrootDevices bool
 	SELinux        bool
 	Debug          bool
-	ConfigVersion  int
 }
 
 type CRIDockerd struct {
@@ -95,6 +94,7 @@ type CRIDockerd struct {
 
 type Flannel struct {
 	Backend      string
+	BackendEnv   []string
 	CNIConfFile  string
 	ConfFile     string
 	ConfOverride bool
@@ -121,6 +121,7 @@ type Agent struct {
 	ClusterDomain           string
 	ResolvConf              string
 	RootDir                 string
+	KubeletConfig           string
 	KubeletConfigDir        string
 	KubeConfigKubelet       string
 	KubeConfigKubeProxy     string
@@ -182,6 +183,7 @@ type CriticalControlArgs struct {
 	EncryptProvider       string       `cli:"secrets-encryption-provider"`
 	EmbeddedRegistry      bool         `cli:"embedded-registry"`
 	FlannelBackend        string       `cli:"flannel-backend"`
+	FlannelBackendEnv     []string
 	FlannelIPv6Masq       bool         `cli:"flannel-ipv6-masq"`
 	FlannelExternalIP     bool         `cli:"flannel-external-ip"`
 	EgressSelectorMode    string       `cli:"egress-selector-mode"`
@@ -207,6 +209,7 @@ type Control struct {
 	KubeConfigOutput         string
 	KubeConfigMode           string
 	KubeConfigGroup          string
+	KubeConfigName           string
 	HelmJobImage             string
 	DataDir                  string
 	KineTLS                  bool

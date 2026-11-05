@@ -16,16 +16,12 @@ import (
 	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apimachinery/pkg/watch"
-	toolscache "k8s.io/client-go/tools/cache"
-	toolswatch "k8s.io/client-go/tools/watch"
 	cloudproviderapi "k8s.io/cloud-provider/api"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
@@ -213,17 +209,17 @@ func apiServer(ctx context.Context, cfg *config.Control) error {
 	argsMap["cert-dir"] = certDir
 	argsMap["allow-privileged"] = "true"
 	argsMap["enable-bootstrap-token-auth"] = "true"
-	if util.ArgValue("authorization-config", cfg.ExtraAPIArgs) == "" {
+	if _, ok := util.ArgValue("authorization-config", cfg.ExtraAPIArgs); !ok {
 		argsMap["authorization-mode"] = strings.Join([]string{modes.ModeNode, modes.ModeRBAC}, ",")
 	} else {
 		logrus.Warn("Not setting kube-apiserver 'authorization-mode' flag due to user-provided 'authorization-config' file.")
 	}
-	if util.ArgValue("authentication-config", cfg.ExtraAPIArgs) == "" {
+	if _, ok := util.ArgValue("authentication-config", cfg.ExtraAPIArgs); !ok {
 		argsMap["anonymous-auth"] = "false"
 	} else {
 		logrus.Warn("Not setting kube-apiserver 'anonymous-auth' flag due to user-provided 'authentication-config' file.")
 	}
-	if util.ArgValue("service-account-signing-endpoint", cfg.ExtraAPIArgs) == "" {
+	if _, ok := util.ArgValue("service-account-signing-endpoint", cfg.ExtraAPIArgs); !ok {
 		argsMap["service-account-signing-key-file"] = runtime.ServiceCurrentKey
 		argsMap["service-account-key-file"] = runtime.ServiceKey
 	} else {
@@ -457,16 +453,7 @@ func waitForUntaintedNode(ctx context.Context, kubeConfig string) error {
 		return err
 	}
 
-	lw := toolscache.NewListWatchFromClient(client.CoreV1().RESTClient(), "nodes", metav1.NamespaceNone, fields.Everything())
-
-	condition := func(ev watch.Event) (bool, error) {
-		if node, ok := ev.Object.(*v1.Node); ok {
-			return getCloudTaint(node.Spec.Taints) == nil, nil
-		}
-		return false, errors.New("event object not of type v1.Node")
-	}
-
-	if _, err := toolswatch.UntilWithSync(ctx, lw, &v1.Node{}, nil, condition); err != nil {
+	if err := util.WaitForNode(ctx, client, "", func(node *v1.Node) (bool, error) { return getCloudTaint(node.Spec.Taints) == nil, nil }); err != nil {
 		return errors.WithMessage(err, "failed to wait for untainted node")
 	}
 	return nil

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -33,6 +34,7 @@ type watchqueue struct {
 	watcher    *fsnotify.Watcher
 	filesCache map[string]*fileInfo
 	workqueue  workqueue.TypedDelayingInterface[string]
+	mu         sync.RWMutex
 }
 
 func createWatcher(path string) (*fsnotify.Watcher, error) {
@@ -114,6 +116,9 @@ func (w *watchqueue) processNextEventForImages(ctx context.Context, client *cont
 func (w *watchqueue) processImageEvent(ctx context.Context, key string, client *containerd.Client, imageClient runtimeapi.ImageServiceClient) error {
 	defer w.workqueue.Done(key)
 
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
 	// Watch is rooted at the parent dir of the images dir, but we only need to handle things within the images dir
 	if !strings.HasPrefix(key, w.cfg.Images) {
 		return nil
@@ -162,7 +167,9 @@ func (w *watchqueue) processImageEvent(ctx context.Context, key string, client *
 		return nil
 	}
 
-	if lastFileState := w.filesCache[key]; lastFileState == nil || lastFileState.Images == nil || file.Size() != lastFileState.Size || file.ModTime().After(lastFileState.ModTime.Time) {
+	// metav1.Time is serialized with second precision, so truncate the file's actual mtime before
+	// comparing, otherwise files with a sub-second mtime are re-imported on every start
+	if lastFileState := w.filesCache[key]; fileChanged(file, lastFileState) {
 		start := time.Now()
 		images, err := preloadFile(ctx, w.cfg, client, imageClient, key)
 		if err != nil {
@@ -192,10 +199,32 @@ func (w *watchqueue) processImageEvent(ctx context.Context, key string, client *
 	return nil
 }
 
+// fileChanged reports whether an on-disk file image no longer
+// matches its cached file info.
+func fileChanged(current os.FileInfo, stored *fileInfo) bool {
+	// Never processed before, or processing didn't finish.
+	if stored == nil || stored.Images == nil {
+		return true
+	}
+
+	// Size changed
+	if stored.Size != current.Size() {
+		return true
+	}
+
+	// Truncate to whole seconds, since the stored timestamp
+	// may not keep sub-second precision.
+	currentModTime := current.ModTime().Truncate(time.Second)
+	return !currentModTime.Equal(stored.ModTime.Time)
+}
+
 // pruneCache removes entries for all files that have not been seen since the last restart,
 // and syncs the cache to disk. This is done to ensure that the cache file does not grow without
 // bounds by continuing to track files that do not exist.
 func (w *watchqueue) pruneCache() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	for path, fileState := range w.filesCache {
 		if !fileState.seen {
 			delete(w.filesCache, path)

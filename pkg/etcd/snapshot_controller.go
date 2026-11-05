@@ -8,11 +8,12 @@ import (
 	"strings"
 	"time"
 
-	k3s "github.com/k3s-io/api/k3s.cattle.io/v1"
-	controllersv1 "github.com/k3s-io/api/pkg/generated/controllers/k3s.cattle.io/v1"
+	k3s "github.com/k3s-io/k3s/pkg/apis/k3s.cattle.io/v1"
+	controllersv1 "github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io/v1"
 	"github.com/k3s-io/k3s/pkg/etcd/snapshot"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/errors"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/k3s-io/k3s/pkg/version"
 	controllerv1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
 	v1 "k8s.io/api/core/v1"
@@ -21,7 +22,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/pager"
 	"k8s.io/client-go/util/retry"
 
@@ -268,7 +268,9 @@ func (e *etcdSnapshotHandler) reconcile() error {
 			// A node is considered to match the snapshot if the snapshot name matches the node name
 			// after trimming the leading local- prefix and trailing timestamp and extension.
 			s, _ = strings.CutSuffix(s, ".zip")
-			s = strings.TrimRight(s, "-012345678")
+			if i := strings.LastIndexByte(s, '-'); i >= 0 {
+				s = s[:i]
+			}
 			var matchingNode bool
 			for _, node := range nodeList.Items {
 				if strings.HasSuffix(s, node.Name) {
