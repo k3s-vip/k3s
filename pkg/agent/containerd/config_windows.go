@@ -10,7 +10,7 @@ import (
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/util/errors"
 	"github.com/sirupsen/logrus"
-	"k8s.io/cri-client/pkg/util"
+	"k8s.io/kubernetes/pkg/kubelet/util"
 )
 
 // hostDirectory returns the name of the host dir for a given registry.

@@ -243,12 +243,19 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 			helmcommon.Name,
 			"cluster-admin",
 			strconv.Itoa(config.ControlConfig.HTTPSPort),
+			k8s,
 			apply,
-			util.BuildControllerEventRecorder(ctx, k8s, helmcommon.Name, metav1.NamespaceAll),
-			batch.V1(),
-			core.V1(),
-			helm.V1(),
-			auth.V1())
+			util.BuildControllerEventRecorder(k8s, helmcommon.Name, metav1.NamespaceAll),
+			helm.V1().HelmChart(),
+			helm.V1().HelmChart().Cache(),
+			helm.V1().HelmChartConfig(),
+			helm.V1().HelmChartConfig().Cache(),
+			batch.V1().Job(),
+			batch.V1().Job().Cache(),
+			auth.V1().ClusterRoleBinding(),
+			core.V1().ServiceAccount(),
+			core.V1().ConfigMap(),
+			core.V1().Secret())
 	}
 
 	if config.ControlConfig.Rootless {
