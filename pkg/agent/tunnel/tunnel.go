@@ -297,7 +297,7 @@ func (a *agentTunnel) watchEndpointSlices(ctx context.Context, rbacReady <-chan 
 	lw := toolscache.NewFilteredListWatchFromClient(a.client.DiscoveryV1().RESTClient(), "endpointslices", metav1.NamespaceDefault, func(options *metav1.ListOptions) { options.LabelSelector = labelSelector })
 	indexer, informer, watch, done := toolswatch.NewIndexerInformerWatcher(wrapListWithRefresh(ctx, lw, refreshFromSupervisor), &discoveryv1.EndpointSlice{})
 
-	go informer.RunWithContext(ctx)
+	go informer.Run(ctx.Done())
 	defer func() {
 		watch.Stop()
 		<-done
@@ -529,12 +529,7 @@ func wrapListWithRefresh(ctx context.Context, lw *toolscache.ListWatch, refreshF
 			go refreshFunc(ctx)
 			return lw.ListFunc(options)
 		},
-		ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
-			go refreshFunc(ctx)
-			return lw.ListWithContextFunc(ctx, options)
-		},
-		WatchFunc:            lw.WatchFunc,
-		WatchFuncWithContext: lw.WatchFuncWithContext,
+		WatchFunc: lw.WatchFunc,
 	}
 }
 
