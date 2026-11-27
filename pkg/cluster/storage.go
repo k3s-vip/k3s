@@ -10,10 +10,10 @@ import (
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/etcd/store"
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/wait"
 	"github.com/sirupsen/logrus"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // maxBootstrapWaitAttempts is the number of iterations to wait for another node to populate an empty bootstrap key.
@@ -39,13 +39,10 @@ func RotateBootstrapToken(ctx context.Context, config *config.Control, oldToken 
 
 	tokenKey := storageKey(normalizedToken)
 
-	var bootstrapList []mvccpb.KeyValue
+	var bootstrapList []*mvccpb.KeyValue
 	if err := wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 		bootstrapList, err = storageClient.List(ctx, "/bootstrap", 0)
-		if err != nil {
-			return false, err
-		}
-		return true, nil
+		return err == nil, err
 	}); err != nil {
 		return err
 	}
@@ -137,7 +134,7 @@ func bootstrapKeyData(ctx context.Context, storageClient store.ReadCloser) (*mvc
 	if len(bootstrapList) > 1 {
 		return nil, errors.New("found multiple bootstrap keys in storage")
 	}
-	return &bootstrapList[0], nil
+	return bootstrapList[0], nil
 }
 
 // storageBootstrap loads data from the datastore's bootstrap key into the
@@ -274,8 +271,8 @@ func (c *Cluster) getBootstrapData(ctx context.Context, token string) ([]byte, e
 }
 
 // getBootstrapValues returns the value of all keys under the "/bootstrap" prefix, with a 10 second timeout.
-func getBootstrapValues(ctx context.Context, storageClient store.ReadCloser) ([]mvccpb.KeyValue, error) {
-	var bootstrapList []mvccpb.KeyValue
+func getBootstrapValues(ctx context.Context, storageClient store.ReadCloser) ([]*mvccpb.KeyValue, error) {
+	var bootstrapList []*mvccpb.KeyValue
 	var err error
 
 	if err := wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
@@ -334,7 +331,7 @@ func getBootstrapKeyFromStorage(ctx context.Context, storageClient store.ReadClo
 		// ensure bootstrap is stored in the current token's key
 		logrus.Debugf("checking bootstrap key %s against %s", string(bootstrapKV.Key), tokenKey)
 		if string(bootstrapKV.Key) == tokenKey {
-			return &bootstrapKV, false, nil
+			return bootstrapKV, false, nil
 		}
 	}
 
@@ -344,7 +341,7 @@ func getBootstrapKeyFromStorage(ctx context.Context, storageClient store.ReadClo
 // migrateTokens will list all keys that has prefix /bootstrap and will check for key that is
 // hashed with empty string and keys that is hashed with old token format before normalizing
 // then migrate those and resave only with the normalized token
-func migrateTokens(ctx context.Context, bootstrapList []mvccpb.KeyValue, storageClient store.ReadWriteCloser, emptyStringKey, tokenKey, token, oldToken string) error {
+func migrateTokens(ctx context.Context, bootstrapList []*mvccpb.KeyValue, storageClient store.ReadWriteCloser, emptyStringKey, tokenKey, token, oldToken string) error {
 	oldTokenKey := storageKey(oldToken)
 
 	for _, bootstrapKV := range bootstrapList {
@@ -368,7 +365,7 @@ func migrateTokens(ctx context.Context, bootstrapList []mvccpb.KeyValue, storage
 	return nil
 }
 
-func doMigrateToken(ctx context.Context, storageClient store.ReadWriteCloser, kv mvccpb.KeyValue, oldToken, oldTokenKey, newToken, newTokenKey string) error {
+func doMigrateToken(ctx context.Context, storageClient store.ReadWriteCloser, kv *mvccpb.KeyValue, oldToken, oldTokenKey, newToken, newTokenKey string) error {
 	// make sure that the process is non-destructive by decrypting/re-encrypting/storing the data before deleting the old key
 	data, err := decrypt(oldToken, kv.Value)
 	if err != nil {
